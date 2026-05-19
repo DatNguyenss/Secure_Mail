@@ -22,7 +22,19 @@ def _ensure_db():
         crl_pem BLOB,
         updated_at TEXT
     );
+    CREATE TABLE IF NOT EXISTS audit_log (ts TEXT, event TEXT, details TEXT);
     """)
+    conn.commit()
+    conn.close()
+
+
+def _audit(event: str, details: str = ""):
+    """Ghi một dòng audit log vào SQLite."""
+    conn = sqlite3.connect(KDS_DB)
+    conn.execute(
+        "INSERT INTO audit_log(ts, event, details) VALUES (?, ?, ?)",
+        (dt.datetime.now(dt.timezone.utc).isoformat(), event, details),
+    )
     conn.commit()
     conn.close()
 
@@ -38,6 +50,7 @@ def put_cert(email: str, serial_hex: str, cert_pem: bytes):
     )
     conn.commit()
     conn.close()
+    _audit("PUT_CERT", f"email={email} serial={serial_hex}")
 
 
 def get_cert(email: str) -> dict | None:
@@ -68,6 +81,7 @@ def put_crl(crl_pem: bytes):
     )
     conn.commit()
     conn.close()
+    _audit("SYNC_CRL", "")
 
 
 def get_crl() -> bytes | None:

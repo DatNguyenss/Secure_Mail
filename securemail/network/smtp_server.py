@@ -139,18 +139,22 @@ def _handle_client(conn: socket.socket, addr):
                     tv = ticket_mod.open_ticket(kv, msg["ticket_v"])
                 except Exception as e:
                     send({"ok": False, "error": f"bad ticket: {e}"})
+                    log_event("AUTH_FAIL", f"peer={peer_ip} reason=bad_ticket error={e}")
                     continue
                 if ticket_mod.is_expired(tv):
                     send({"ok": False, "error": "ticket expired"})
+                    log_event("AUTH_FAIL", f"peer={peer_ip} reason=ticket_expired")
                     continue
                 k_c_v = base64.b64decode(tv["session_key_b64"])
                 try:
                     a = auth_mod.open_auth(k_c_v, msg["authenticator"])
                 except Exception as e:
                     send({"ok": False, "error": f"bad authenticator: {e}"})
+                    log_event("AUTH_FAIL", f"peer={peer_ip} reason=bad_authenticator error={e}")
                     continue
                 if a["id_c"] != tv["id_c"]:
                     send({"ok": False, "error": "id_c mismatch"})
+                    log_event("AUTH_FAIL", f"peer={peer_ip} reason=id_mismatch id_c_ticket={tv['id_c']} id_c_auth={a['id_c']}")
                     continue
                 if not SRV_REPLAY.check_and_add(a["id_c"] + "@mail", a.get("nonce", ""), a["ts"]):
                     send({"ok": False, "error": "replay detected"})
@@ -170,6 +174,7 @@ def _handle_client(conn: socket.socket, addr):
                     continue
                 if not access_control.allowed(auth_ctx["role"], "smtp.send"):
                     send({"ok": False, "error": "forbidden"})
+                    log_event("SMTP_FORBIDDEN", f"user={auth_ctx['id_c']} action=smtp.send")
                     continue
                 state["from"] = msg["from"]
                 state["to"] = msg["to"]

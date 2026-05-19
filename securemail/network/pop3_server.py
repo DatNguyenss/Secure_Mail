@@ -23,6 +23,7 @@ from pathlib import Path
 
 from securemail.network.json_framing import send_json, recv_json, b64, unb64
 from securemail.network import tls_lite
+from securemail.network.smtp_server import log_event
 from securemail.crypto.aes_handler import aes_gcm_encrypt
 from securemail.ticket_service import ticket as ticket_mod
 from securemail.ticket_service import authenticator as auth_mod
@@ -80,27 +81,34 @@ def _handle(conn: socket.socket, addr):
                     tv = ticket_mod.open_ticket(kv, msg["ticket_v"])
                 except Exception as e:
                     s({"ok": False, "error": f"bad ticket: {e}"})
+                    log_event("POP3_AUTH_FAIL", f"reason=bad_ticket error={e}")
                     continue
                 if ticket_mod.is_expired(tv):
                     s({"ok": False, "error": "ticket expired"})
+                    log_event("POP3_AUTH_FAIL", f"reason=ticket_expired")
                     continue
                 k_c_v = base64.b64decode(tv["session_key_b64"])
                 try:
                     a = auth_mod.open_auth(k_c_v, msg["authenticator"])
                 except Exception as e:
                     s({"ok": False, "error": f"bad authenticator: {e}"})
+                    log_event("POP3_AUTH_FAIL", f"reason=bad_authenticator error={e}")
                     continue
                 if not SRV_REPLAY.check_and_add(a["id_c"] + "@pop3", a.get("nonce", ""), a["ts"]):
                     s({"ok": False, "error": "replay"})
+                    log_event("POP3_REPLAY", f"user={a['id_c']}")
                     continue
                 resp = {"ts_plus_1": a["ts"] + 1}
                 nonce, ct = aes_gcm_encrypt(k_c_v, json.dumps(resp).encode(), aad=b"mutual-v1")
                 auth_ctx = {"id_c": a["id_c"], "role": tv["role"], "k_c_v": k_c_v}
                 s({"ok": True, "mutual_b64": b64(nonce + ct), "role": tv["role"]})
+                log_event("POP3_AUTH_OK", f"user={auth_ctx['id_c']} role={tv['role']}")
 
             elif op == "LIST":
                 if not auth_ctx or not access_control.allowed(auth_ctx["role"], "pop3.fetch"):
                     s({"ok": False, "error": "forbidden"})
+                    if auth_ctx:
+                        log_event("POP3_FORBIDDEN", f"user={auth_ctx['id_c']} action=pop3.fetch")
                     continue
                 conn2 = sqlite3.connect(MAIL_DB)
                 rows = conn2.execute(
@@ -128,6 +136,7 @@ def _handle(conn: socket.socket, addr):
                 if not row:
                     s({"ok": False, "error": "not found"})
                     continue
+                log_event("POP3_RETR", f"user={auth_ctx['id_c']} msg_id={msg['id']}")
                 s({"ok": True, "sender": row[0], "envelope_b64": b64(row[1]),
                    "headers": json.loads(row[2]),
                    "dmarc_action": row[3], "spf_result": row[4], "dkim_result": row[5]})
@@ -141,6 +150,7 @@ def _handle(conn: socket.socket, addr):
                               (msg["id"], auth_ctx["id_c"]))
                 conn2.commit()
                 conn2.close()
+                log_event("POP3_DELE", f"user={auth_ctx['id_c']} msg_id={msg['id']}")
                 s({"ok": True})
 
             elif op == "QUIT":

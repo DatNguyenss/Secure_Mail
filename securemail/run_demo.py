@@ -250,13 +250,11 @@ def scenario_3_replay_attack():
 
 def scenario_4_revoked_cert():
     _banner("Scenario 4 — Revoked Certificate (M3)")
-    # Alice's cert get revoked
-    import sqlite3
-    conn = sqlite3.connect(ca_core.CA_DB)
-    row = conn.execute("SELECT serial FROM issued WHERE email=?", (f"alice@{DOMAIN}",)).fetchone()
-    conn.close()
-    assert row, "alice cert not found"
-    serial = row[0]
+    # Get Alice's currently active certificate from KDS to revoke the correct active cert
+    cert_pem = kds_client.get_cert(f"alice@{DOMAIN}")
+    assert cert_pem, "alice cert not found in KDS"
+    cert = x509.load_pem_x509_certificate(cert_pem)
+    serial = hex(cert.serial_number)
     print(f"  revoking alice's cert {serial} ...")
     request("127.0.0.1", 9000, {"op": "ca.revoke", "serial_hex": serial})
 

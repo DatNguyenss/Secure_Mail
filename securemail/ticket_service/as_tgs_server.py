@@ -164,17 +164,21 @@ def handle_tgs_req(req: dict) -> dict:
     try:
         tgt_payload = ticket_mod.open_ticket(tgs_key, req["tgt"])
     except Exception as e:
+        _audit("TGS_REQ_FAIL", f"reason=bad_tgt error={e}")
         return {"ok": False, "error": f"bad tgt: {e}"}
     if ticket_mod.is_expired(tgt_payload):
+        _audit("TGS_REQ_FAIL", f"id_c={tgt_payload.get('id_c')} reason=tgt_expired")
         return {"ok": False, "error": "tgt expired"}
 
     k_c_tgs = base64.b64decode(tgt_payload["session_key_b64"])
     try:
         auth_plain = auth_mod.open_auth(k_c_tgs, req["authenticator"])
     except Exception as e:
+        _audit("TGS_REQ_FAIL", f"id_c={tgt_payload.get('id_c')} reason=bad_authenticator error={e}")
         return {"ok": False, "error": f"bad authenticator: {e}"}
 
     if auth_plain["id_c"] != tgt_payload["id_c"]:
+        _audit("TGS_REQ_FAIL", f"id_c_tgt={tgt_payload['id_c']} id_c_auth={auth_plain['id_c']} reason=id_mismatch")
         return {"ok": False, "error": "id_c mismatch"}
     if not REPLAY_CACHE.check_and_add(
         auth_plain["id_c"] + "@tgs",
