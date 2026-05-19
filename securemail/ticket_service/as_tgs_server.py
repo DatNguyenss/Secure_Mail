@@ -8,6 +8,7 @@ Endpoints:
   ts.service_keys        { id_v }                          (server-only) → Kv hex
 """
 import base64
+import datetime as dt
 import json
 import os
 import socket
@@ -57,7 +58,19 @@ def _ensure_db():
         tgt_hash TEXT PRIMARY KEY,
         revoked_at TEXT
     );
+    CREATE TABLE IF NOT EXISTS audit_log (ts TEXT, event TEXT, details TEXT);
     """)
+    conn.commit()
+    conn.close()
+
+
+def _audit(event: str, details: str = ""):
+    """Ghi một dòng audit log vào SQLite."""
+    conn = sqlite3.connect(TS_DB)
+    conn.execute(
+        "INSERT INTO audit_log(ts, event, details) VALUES (?, ?, ?)",
+        (dt.datetime.now(dt.timezone.utc).isoformat(), event, details),
+    )
     conn.commit()
     conn.close()
 
@@ -91,6 +104,7 @@ def register_principal(id_c: str, salt: bytes, kc: bytes, role: str = "user"):
     )
     conn.commit()
     conn.close()
+    _audit("REGISTER_PRINCIPAL", f"id_c={id_c} role={role}")
     print(f"[TS] Registered principal {id_c} role={role}")
 
 
@@ -115,6 +129,7 @@ def handle_as_req(req: dict) -> dict:
     ts1 = req["ts1"]
     p = _get_principal(id_c)
     if not p:
+        _audit("AS_REQ_FAIL", f"id_c={id_c} reason=unknown_principal")
         return {"ok": False, "error": "unknown principal"}
 
     kc = p["kc"]
@@ -139,6 +154,7 @@ def handle_as_req(req: dict) -> dict:
         "tgt": tgt,
         "nonce_echo": ts1,
     }
+    _audit("AS_REQ_OK", f"id_c={id_c}")
     return {"ok": True, "as_rep_b64": _seal_for_user(kc, as_rep_payload),
             "salt_b64": base64.b64encode(p["salt"]).decode("ascii")}
 
@@ -165,6 +181,7 @@ def handle_tgs_req(req: dict) -> dict:
         auth_plain.get("nonce", ""),
         auth_plain["ts"],
     ):
+        _audit("TGS_REQ_REPLAY", f"id_c={auth_plain['id_c']}")
         return {"ok": False, "error": "replay detected"}
 
     id_v = req["id_v"]
@@ -190,6 +207,7 @@ def handle_tgs_req(req: dict) -> dict:
     }
     data = json.dumps(tgs_rep_payload, sort_keys=True).encode("utf-8")
     nonce, ct = aes_gcm_encrypt(k_c_tgs, data, aad=b"tgs-rep-v1")
+    _audit("TGS_REQ_OK", f"id_c={tgt_payload['id_c']} id_v={id_v}")
     return {"ok": True, "tgs_rep_b64": base64.b64encode(nonce + ct).decode("ascii")}
 
 

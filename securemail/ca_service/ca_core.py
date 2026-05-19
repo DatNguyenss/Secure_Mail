@@ -15,7 +15,7 @@ CA_DIR = Path("data/ca")
 CA_DB = CA_DIR / "ca.db"
 CA_KEY_FILE = CA_DIR / "ca_key.pem"
 CA_CERT_FILE = CA_DIR / "ca_cert.pem"
-CA_PASSPHRASE = b"securemail-root-ca-2026"  # demo; production dùng HSM
+CA_PASSPHRASE = os.environ.get("CA_PASSPHRASE", "securemail-root-ca-2026").encode("utf-8")
 
 
 def _ensure_db():
@@ -33,7 +33,19 @@ def _ensure_db():
         revoked_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_email ON issued(email);
+    CREATE TABLE IF NOT EXISTS audit_log (ts TEXT, event TEXT, details TEXT);
     """)
+    conn.commit()
+    conn.close()
+
+
+def _audit(event: str, details: str = ""):
+    """Ghi một dòng audit log vào SQLite."""
+    conn = sqlite3.connect(CA_DB)
+    conn.execute(
+        "INSERT INTO audit_log(ts, event, details) VALUES (?, ?, ?)",
+        (dt.datetime.now(dt.timezone.utc).isoformat(), event, details),
+    )
     conn.commit()
     conn.close()
 
@@ -73,6 +85,7 @@ def init_root_ca(common_name: str = "SecureMail Root CA", org: str = "SecureMail
     )
     CA_KEY_FILE.write_bytes(rsa_handler.serialize_private_pem(priv, CA_PASSPHRASE))
     CA_CERT_FILE.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    _audit("INIT_ROOT_CA", f"cn={common_name} org={org}")
     print(f"[CA] Root CA created: {common_name}")
 
 
@@ -150,6 +163,7 @@ def sign_csr(csr_pem: bytes, email: str, days_valid: int = 365) -> bytes:
     )
     conn.commit()
     conn.close()
+    _audit("SIGN_CSR", f"email={email} serial={hex(serial)}")
     print(f"[CA] Signed cert for {email}, serial={hex(serial)}")
     return cert_pem
 
@@ -163,6 +177,7 @@ def revoke_cert(serial_hex: str) -> bool:
     ok = cur.rowcount > 0
     conn.close()
     if ok:
+        _audit("REVOKE", f"serial={serial_hex}")
         print(f"[CA] Revoked cert {serial_hex}")
     return ok
 
