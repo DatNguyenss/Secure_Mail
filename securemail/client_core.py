@@ -25,11 +25,97 @@ from securemail.ticket_service.as_tgs_server import MAIL_SRV_NAME
 
 
 USER_DIR = Path("data/users")
+SESSION_FILE = Path("data/active_session.json")
 
 
 def _user_path(email: str, suffix: str) -> Path:
     safe = email.replace("@", "_at_")
     return USER_DIR / f"{safe}.{suffix}"
+
+
+# ======================================================================
+# Session persistence (stateful CLI mode)
+# ======================================================================
+def save_session(ctx: dict):
+    """Serialize login context to a JSON file so later CLI invocations
+    can reuse the session without re-entering email/password.
+
+    The private key is stored as unencrypted PEM (session-local only).
+    """
+    SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "email": ctx["email"],
+        "tgt": ctx["tgt"],
+        "k_c_tgs_b64": base64.b64encode(ctx["k_c_tgs"]).decode("ascii"),
+        "cert_pem": ctx["cert_pem"].decode("utf-8"),
+        "privkey_pem": rsa_handler.serialize_private_pem(ctx["privkey"]).decode("utf-8"),
+    }
+    SESSION_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def load_session() -> dict | None:
+    """Load a previously saved session.  Returns ctx dict or None."""
+    if not SESSION_FILE.exists():
+        return None
+    try:
+        data = json.loads(SESSION_FILE.read_text(encoding="utf-8"))
+        privkey = rsa_handler.load_private_pem(
+            data["privkey_pem"].encode("utf-8"), None
+        )
+        return {
+            "email": data["email"],
+            "tgt": data["tgt"],
+            "k_c_tgs": base64.b64decode(data["k_c_tgs_b64"]),
+            "cert_pem": data["cert_pem"].encode("utf-8"),
+            "privkey": privkey,
+        }
+    except Exception as exc:
+        print(f"[Session] Failed to load session: {exc}")
+        return None
+
+
+def clear_session():
+    """Delete the cached session file."""
+    if SESSION_FILE.exists():
+        SESSION_FILE.unlink()
+
+
+# ======================================================================
+# Key recovery wrapper (Shamir escrow)
+# ======================================================================
+def recover_user_key(email: str, share_indices: list[int] | None = None) -> bytes:
+    """Recover a user's escrowed private key via Shamir 2-of-3.
+
+    If *share_indices* is ``None``, automatically detect available share
+    files and pick the first two.  The recovered PEM is written back to
+    the user's local key file so they can log in again.
+    """
+    from securemail.ca_service import key_escrow
+
+    if share_indices is None:
+        # Auto-detect shares
+        safe = email.replace("@", "_at_")
+        found = []
+        for i in range(1, 4):
+            p = key_escrow.ESCROW_DIR / f"{safe}.share{i}.bin"
+            if p.exists():
+                found.append(i)
+        if len(found) < 2:
+            raise RuntimeError(
+                f"Not enough shares found for {email} "
+                f"(found {found}, need >=2)"
+            )
+        share_indices = found[:2]
+
+    recovered_pem = key_escrow.recover_key(email, share_indices)
+
+    # Overwrite the local key file so the user can log in again
+    key_path = _user_path(email, "key.pem")
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    key_path.write_bytes(recovered_pem)
+    print(f"[Recovery] Restored private key for {email} "
+          f"using shares {share_indices} -> {key_path}")
+    return recovered_pem
 
 
 def register(email: str, password: str, display_name: str = "", role: str = "user"):
@@ -226,3 +312,98 @@ def fetch_inbox(ctx: dict, host: str = "127.0.0.1", port: int = 1100) -> list[di
             })
     cli.quit()
     return out
+
+
+# ======================================================================
+# Security classification
+# ======================================================================
+def classify_security(msg: dict) -> tuple[str, str]:
+    """Classify a message's security posture.
+
+    Returns (label, reason) where label is one of:
+      - "SECURE"    — signature valid, SPF pass, DKIM pass/none, DMARC accept
+      - "WARNING"   — minor issues (e.g. DKIM none, DMARC quarantine)
+      - "DANGEROUS" — signature invalid, decryption error, or DMARC reject
+
+    The *reason* string gives a short human-readable explanation.
+    """
+    # --- Decryption / signature error is always dangerous ---
+    if msg.get("error"):
+        return ("DANGEROUS", f"Decryption/verification error: {msg['error']}")
+
+    if not msg.get("signature_valid"):
+        return ("DANGEROUS", "S/MIME signature is INVALID")
+
+    dmarc = msg.get("dmarc_action", "accept")
+    spf = msg.get("spf_result", "pass")
+    dkim = msg.get("dkim_result", "none")
+
+    # DMARC reject → always dangerous
+    if dmarc == "reject":
+        return ("DANGEROUS", "DMARC policy: reject")
+
+    # Build a list of minor issues
+    issues: list[str] = []
+    if dmarc == "quarantine":
+        issues.append("DMARC quarantine")
+    if spf == "fail":
+        issues.append("SPF failed")
+    if dkim == "fail":
+        issues.append("DKIM failed")
+    elif dkim not in ("pass", "none"):
+        issues.append(f"DKIM anomaly: {dkim}")
+
+    if issues:
+        return ("WARNING", "; ".join(issues))
+
+    return ("SECURE", "Signature valid, SPF pass, DMARC accept")
+
+
+# ======================================================================
+# Fetch a single message by ID
+# ======================================================================
+def fetch_message(
+    ctx: dict, msg_id: int,
+    host: str = "127.0.0.1", port: int = 1100,
+) -> dict | None:
+    """Retrieve and decrypt a single message from POP3 by its numeric ID.
+
+    Returns the same dict structure as elements of fetch_inbox(), or None
+    if the message was not found.
+    """
+    st = get_service_ticket(ctx)
+    cli = pop3_client.Pop3Client(host, port)
+    cli.helo_starttls()
+    cli.auth(ctx["email"], st["ticket_v"], st["k_c_v"])
+
+    full = cli.retr(msg_id)
+    cli.quit()
+
+    if not full:
+        return None
+
+    try:
+        opened = smime_handler.open_envelope(
+            full["envelope"], ctx["email"], ctx["privkey"]
+        )
+        return {
+            "id": msg_id,
+            "sender": full["sender"],
+            "subject": full["headers"].get("Subject", ""),
+            "date": full["headers"].get("Date", ""),
+            "body": opened["body"].decode("utf-8", errors="replace"),
+            "signer_subject": opened["signer_subject"],
+            "signature_valid": True,
+            "dmarc_action": full["dmarc_action"],
+            "spf_result": full["spf_result"],
+            "dkim_result": full["dkim_result"],
+        }
+    except Exception as e:
+        return {
+            "id": msg_id,
+            "sender": full["sender"],
+            "subject": full["headers"].get("Subject", ""),
+            "error": str(e),
+            "signature_valid": False,
+            "dmarc_action": full["dmarc_action"],
+        }
