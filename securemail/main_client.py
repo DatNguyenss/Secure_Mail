@@ -222,13 +222,31 @@ def cli_main():
     # --- recover: key escrow recovery ---
     elif cmd_name == "recover":
         ctx = client_core.load_session()
-        if ctx is None:
-            print("Error: No active session. Please login first.")
-            sys.exit(1)
+        email = None
         shares = None
-        if len(sys.argv) >= 4:
-            shares = [int(x) for x in sys.argv[2:4]]
-        client_core.recover_user_key(ctx["email"], shares)
+        if ctx is not None:
+            email = ctx["email"]
+            if len(sys.argv) >= 4:
+                try:
+                    shares = [int(x) for x in sys.argv[2:4]]
+                except ValueError:
+                    pass
+        else:
+            if len(sys.argv) < 3:
+                print("Error: No active session. Usage:")
+                print("  python -m securemail.main_client recover <email> [<share1> <share2>]")
+                sys.exit(1)
+            email = sys.argv[2]
+            if len(sys.argv) >= 5:
+                try:
+                    shares = [int(sys.argv[3]), int(sys.argv[4])]
+                except ValueError:
+                    pass
+        try:
+            client_core.recover_user_key(email, shares)
+        except Exception as exc:
+            print(f"Recovery failed: {exc}")
+            sys.exit(1)
 
     # --- status: show who is logged in ---
     elif cmd_name == "status":
@@ -398,17 +416,31 @@ class SecureMailShell(cmd.Cmd):
     # recover [share1 share2]
     # ------------------------------------------------------------------
     def do_recover(self, line: str):
-        """Recover escrowed private key: recover [<share1> <share2>]"""
-        if self._ctx is None:
-            print("Error: Not logged in. Use 'login <email> <password>' first.")
-            return
+        """Recover escrowed private key: recover [<email>] [<share1> <share2>]"""
         parts = line.split()
+        email = None
         shares = None
-        if len(parts) >= 2:
-            shares = [int(x) for x in parts[:2]]
+        if self._ctx is not None:
+            email = self._ctx["email"]
+            if len(parts) >= 2:
+                try:
+                    shares = [int(x) for x in parts[:2]]
+                except ValueError:
+                    pass
+        else:
+            if not parts:
+                print("Error: Not logged in. Usage:")
+                print("  recover <email> [<share1> <share2>]")
+                return
+            email = parts[0]
+            if len(parts) >= 3:
+                try:
+                    shares = [int(x) for x in parts[1:3]]
+                except ValueError:
+                    pass
         try:
-            client_core.recover_user_key(self._ctx["email"], shares)
-            print("Key recovered successfully.")
+            client_core.recover_user_key(email, shares)
+            print(f"Key for {email} recovered successfully.")
         except Exception as exc:
             print(f"Recovery failed: {exc}")
 

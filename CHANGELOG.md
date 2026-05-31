@@ -19,7 +19,7 @@ Chạy trực tiếp từ shell hệ thống, tự động lưu và tải phiên
 | `python -m securemail.main_client list` | **[MỚI]** Liệt kê bảng rút gọn inbox có nhãn bảo mật màu (`SECURE`, `WARNING`, `DANGEROUS`). |
 | `python -m securemail.main_client read <id>` | **[MỚI]** Xem chi tiết nội dung giải mã và chứng thực của một email cụ thể theo ID. |
 | `python -m securemail.main_client fetch` | Tải và giải mã toàn bộ inbox (giao diện legacy, dump toàn bộ thư). |
-| `python -m securemail.main_client recover [<share1> <share2>]` | Khôi phục khóa riêng bằng cơ chế Shamir Secret Sharing (2-of-3). |
+| `python -m securemail.main_client recover [<email>] [<share1> <share2>]` | Khôi phục khóa riêng bằng cơ chế Shamir Secret Sharing (2-of-3). Nếu chưa đăng nhập, bắt buộc truyền vào `<email>`. |
 | `python -m securemail.main_client logout` | Đăng xuất, xóa file session cục bộ. |
 
 ### 2. Chế độ Interactive Shell (REPL)
@@ -37,7 +37,7 @@ Phiên làm việc được giữ trực tiếp trong bộ nhớ (In-Memory).
 | `list` | **[MỚI]** Tải inbox và hiển thị danh sách thư rút gọn kèm nhãn bảo mật. Đồng thời cache kết quả. |
 | `read <id>` | **[MỚI]** Xem chi tiết email cụ thể theo ID (đọc nhanh từ cache nếu đã chạy `list`, hoặc fetch POP3). |
 | `fetch` | Tải và giải mã hiển thị toàn bộ inbox (legacy view). |
-| `recover [<share1> <share2>]` | Khôi phục khóa riêng bằng Shamir từ REPL. |
+| `recover [<email>] [<share1> <share2>]` | Khôi phục khóa riêng bằng Shamir từ REPL. Nếu chưa đăng nhập, bắt buộc truyền vào `<email>`. |
 | `logout` | Đăng xuất người dùng hiện tại, prompt quay lại thành `securemail> `. |
 | `help` / `help <lệnh>` | Hiển thị trợ giúp của REPL hoặc chi tiết cách dùng một lệnh. |
 | `exit` / `quit` | Thoát chế độ Interactive Shell (REPL). |
