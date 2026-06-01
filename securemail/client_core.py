@@ -272,75 +272,119 @@ def send_secure_email(
     return {"envelope_len": len(envelope), "results": results}
 
 
+def _decode_pop3_message(ctx: dict, msg_id: int, full: dict) -> dict:
+    """Convert a POP3 RETR response into the public inbox message shape."""
+    headers = full.get("headers", {})
+    base = {
+        "id": msg_id,
+        "sender": full.get("sender", ""),
+        "recipient": ctx["email"],
+        "to": headers.get("To", ctx["email"]),
+        "subject": headers.get("Subject", ""),
+        "date": headers.get("Date", ""),
+        "dmarc_action": full.get("dmarc_action", ""),
+        "spf_result": full.get("spf_result", ""),
+        "dkim_result": full.get("dkim_result", ""),
+    }
+
+    try:
+        opened = smime_handler.open_envelope(
+            full["envelope"], ctx["email"], ctx["privkey"]
+        )
+        base.update({
+            "body": opened["body"].decode("utf-8", errors="replace"),
+            "signer_subject": opened.get("signer_subject", ""),
+            "signature_valid": bool(opened.get("signature_valid", True)),
+        })
+    except Exception as e:
+        base.update({
+            "error": str(e),
+            "signature_valid": False,
+        })
+    return base
+
+
 def fetch_inbox(ctx: dict, host: str = "127.0.0.1", port: int = 1100) -> list[dict]:
     """Fetch + decrypt + verify all new messages."""
     st = get_service_ticket(ctx)
     cli = pop3_client.Pop3Client(host, port)
-    cli.helo_starttls()
-    cli.auth(ctx["email"], st["ticket_v"], st["k_c_v"])
-    msgs = cli.list()
+    try:
+        cli.helo_starttls()
+        cli.auth(ctx["email"], st["ticket_v"], st["k_c_v"])
+        msgs = cli.list()
 
-    out = []
-    for m in msgs:
-        full = cli.retr(m["id"])
-        if not full:
-            continue
-        try:
-            opened = smime_handler.open_envelope(
-                full["envelope"], ctx["email"], ctx["privkey"]
-            )
-            out.append({
-                "id": m["id"],
-                "sender": full["sender"],
-                "subject": full["headers"].get("Subject", ""),
-                "date": full["headers"].get("Date", ""),
-                "body": opened["body"].decode("utf-8", errors="replace"),
-                "signer_subject": opened["signer_subject"],
-                "signature_valid": True,
-                "dmarc_action": full["dmarc_action"],
-                "spf_result": full["spf_result"],
-                "dkim_result": full["dkim_result"],
-            })
-        except Exception as e:
-            out.append({
-                "id": m["id"],
-                "sender": full["sender"],
-                "subject": full["headers"].get("Subject", ""),
-                "error": str(e),
-                "signature_valid": False,
-                "dmarc_action": full["dmarc_action"],
-            })
-    cli.quit()
-    return out
+        out = []
+        for m in msgs:
+            full = cli.retr(m["id"])
+            if not full:
+                continue
+            out.append(_decode_pop3_message(ctx, m["id"], full))
+        return out
+    finally:
+        cli.quit()
 
 
 # ======================================================================
 # Security classification
 # ======================================================================
-def classify_security(msg: dict) -> tuple[str, str]:
+def classify_security(
+    msg: dict | str,
+    body: str | None = None,
+    sender: str | None = None,
+) -> tuple[str, str]:
     """Classify a message's security posture.
+
+    The primary API accepts a decoded message dict.  For compatibility
+    with the changelog description, this function also accepts
+    classify_security(subject, body, sender).
 
     Returns (label, reason) where label is one of:
       - "SECURE"    — signature valid, SPF pass, DKIM pass/none, DMARC accept
-      - "WARNING"   — minor issues (e.g. DKIM none, DMARC quarantine)
-      - "DANGEROUS" — signature invalid, decryption error, or DMARC reject
+      - "WARNING"   — minor issues, suspicious keywords, or external sender
+      - "DANGEROUS" — invalid crypto, DMARC reject, or dangerous keywords
 
     The *reason* string gives a short human-readable explanation.
     """
+    if isinstance(msg, dict):
+        subject = msg.get("subject", "")
+        body_text = msg.get("body", "")
+        sender_addr = msg.get("sender", "")
+    else:
+        subject = msg or ""
+        body_text = body or ""
+        sender_addr = sender or ""
+        msg = {
+            "subject": subject,
+            "body": body_text,
+            "sender": sender_addr,
+            "signature_valid": True,
+            "dmarc_action": "accept",
+            "spf_result": "pass",
+            "dkim_result": "none",
+        }
+
     # --- Decryption / signature error is always dangerous ---
     if msg.get("error"):
         return ("DANGEROUS", f"Decryption/verification error: {msg['error']}")
 
-    if not msg.get("signature_valid"):
+    if msg.get("signature_valid") is False:
         return ("DANGEROUS", "S/MIME signature is INVALID")
 
     dmarc = msg.get("dmarc_action", "accept")
     spf = msg.get("spf_result", "pass")
     dkim = msg.get("dkim_result", "none")
 
-    # DMARC reject → always dangerous
+    # DMARC reject -> always dangerous
     if dmarc == "reject":
         return ("DANGEROUS", "DMARC policy: reject")
+
+    text = f"{subject}\n{body_text}".lower()
+    dangerous_keywords = ("virus", "malware", "hack", "phishing")
+    warning_keywords = ("warning", "critical", "suspicious")
+
+    for keyword in dangerous_keywords:
+        if keyword in text:
+            return ("DANGEROUS", f"Dangerous keyword detected: {keyword}")
 
     # Build a list of minor issues
     issues: list[str] = []
@@ -352,6 +396,12 @@ def classify_security(msg: dict) -> tuple[str, str]:
         issues.append("DKIM failed")
     elif dkim not in ("pass", "none"):
         issues.append(f"DKIM anomaly: {dkim}")
+    for keyword in warning_keywords:
+        if keyword in text:
+            issues.append(f"Suspicious keyword: {keyword}")
+            break
+    if sender_addr and not sender_addr.lower().endswith("@mail.local"):
+        issues.append("Sender is outside @mail.local")
 
     if issues:
         return ("WARNING", "; ".join(issues))
@@ -373,37 +423,13 @@ def fetch_message(
     """
     st = get_service_ticket(ctx)
     cli = pop3_client.Pop3Client(host, port)
-    cli.helo_starttls()
-    cli.auth(ctx["email"], st["ticket_v"], st["k_c_v"])
-
-    full = cli.retr(msg_id)
-    cli.quit()
-
-    if not full:
-        return None
-
     try:
-        opened = smime_handler.open_envelope(
-            full["envelope"], ctx["email"], ctx["privkey"]
-        )
-        return {
-            "id": msg_id,
-            "sender": full["sender"],
-            "subject": full["headers"].get("Subject", ""),
-            "date": full["headers"].get("Date", ""),
-            "body": opened["body"].decode("utf-8", errors="replace"),
-            "signer_subject": opened["signer_subject"],
-            "signature_valid": True,
-            "dmarc_action": full["dmarc_action"],
-            "spf_result": full["spf_result"],
-            "dkim_result": full["dkim_result"],
-        }
-    except Exception as e:
-        return {
-            "id": msg_id,
-            "sender": full["sender"],
-            "subject": full["headers"].get("Subject", ""),
-            "error": str(e),
-            "signature_valid": False,
-            "dmarc_action": full["dmarc_action"],
-        }
+        cli.helo_starttls()
+        cli.auth(ctx["email"], st["ticket_v"], st["k_c_v"])
+
+        full = cli.retr(msg_id)
+        if not full:
+            return None
+        return _decode_pop3_message(ctx, msg_id, full)
+    finally:
+        cli.quit()

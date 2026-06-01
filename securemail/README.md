@@ -43,14 +43,28 @@ python -m securemail.run_demo all
 # Đăng ký user mới (auto tạo keypair, ký CSR, push KDS, đăng ký Kerberos principal)
 python -m securemail.main_client register carol@mail.local carol-pw "Carol"
 
-# Đăng nhập test (AS-REQ / AS-REP)
+# Đăng nhập một lần, lưu phiên vào data/active_session.json
 python -m securemail.main_client login alice@mail.local alice-pw
+python -m securemail.main_client status
 
 # Gửi email có mã hóa + ký
-echo "Hello Bob" | python -m securemail.main_client send alice@mail.local alice-pw bob@mail.local "Test subject"
+echo "Hello Bob" | python -m securemail.main_client send bob@mail.local "Test subject"
 
-# Lấy inbox (POP3 + decrypt + verify)
-python -m securemail.main_client fetch bob@mail.local bob-pw
+# Xem inbox rút gọn và đọc chi tiết một thư
+python -m securemail.main_client list
+python -m securemail.main_client read 1
+
+# Lấy inbox kiểu legacy: dump toàn bộ nội dung
+python -m securemail.main_client fetch
+
+# Khôi phục khóa bằng Shamir 2-of-3
+python -m securemail.main_client recover bob@mail.local 1 2
+
+# Đăng xuất
+python -m securemail.main_client logout
+
+# REPL tương tác
+python -m securemail.main_client
 ```
 
 ### CLI CA admin

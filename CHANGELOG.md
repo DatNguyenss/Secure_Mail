@@ -44,6 +44,51 @@ Phiên làm việc được giữ trực tiếp trong bộ nhớ (In-Memory).
 
 ---
 
+## [2026-06-01] — Hoàn thiện Stateful CLI theo Command Reference
+
+### 🎯 Mục tiêu
+Rà soát lại `CHANGELOG` và hoàn thiện chế độ CLI/REPL để các lệnh được công bố trong Command Reference chạy đúng cú pháp, báo lỗi rõ ràng, và hiển thị inbox theo chế độ rút gọn/chi tiết.
+
+### 📁 File thay đổi
+
+#### 1. `securemail/client_core.py`
+- Chuẩn hóa dữ liệu thư trả về từ `fetch_inbox()` và `fetch_message()` qua helper dùng chung, bổ sung trường `recipient`/`to`.
+- Đảm bảo kết nối POP3 luôn được đóng bằng `quit()` kể cả khi có lỗi.
+- Mở rộng `classify_security()`:
+  - Vẫn giữ phân loại theo S/MIME, SPF, DKIM, DMARC như thiết kế ban đầu.
+  - Bổ sung nhận diện từ khóa nguy hiểm (`virus`, `malware`, `hack`, `phishing`) và từ khóa cảnh báo (`warning`, `critical`, `suspicious`).
+  - Cảnh báo khi người gửi không thuộc domain nội bộ `@mail.local`.
+  - Hỗ trợ cả dạng gọi `classify_security(msg)` và `classify_security(subject, body, sender)`.
+
+#### 2. `securemail/main_client.py`
+- Thêm `help` / `-h` / `--help` cho chế độ CLI một lệnh.
+- Kiểm tra tham số cho `register`, `login`, `send`, `read`, `recover` để không còn lỗi `IndexError` khi gọi thiếu đối số.
+- Hoàn thiện cú pháp `recover [<email>] [<share1> <share2>]`:
+  - Đã đăng nhập: có thể bỏ qua email hoặc truyền email khác.
+  - Chưa đăng nhập: bắt buộc truyền email.
+  - Share phải là 2 chỉ số khác nhau trong `1, 2, 3`.
+- Màn hình `read <id>` hiển thị thêm người nhận (`To`).
+- REPL xóa cache inbox khi `login`/`logout` để tránh đọc nhầm cache của phiên trước.
+- REPL chuẩn hóa input có BOM khi pipe từ PowerShell để không nhận nhầm `login` thành lệnh không hợp lệ.
+
+#### 3. `securemail/README.md`
+- Cập nhật phần CLI người dùng sang đúng chế độ stateful: `login` một lần, sau đó dùng `status`, `send`, `list`, `read`, `fetch`, `recover`, `logout`.
+
+### ✅ Tương thích ngược
+- `fetch` legacy vẫn giữ nguyên chức năng dump toàn bộ inbox.
+- `register`, `login`, `send_secure_email()`, `fetch_inbox()` và các service server-side không đổi giao thức.
+
+### 🧪 Cách kiểm thử
+```bash
+python -m compileall securemail
+python -m securemail.main_client help
+python -m securemail.main_client status
+python -m securemail.main_client read
+python -m securemail.main_client recover
+```
+
+---
+
 ## [2026-05-31] — Inbox Listing, Security Classification & Detailed Message View
 
 ### 🎯 Mục tiêu

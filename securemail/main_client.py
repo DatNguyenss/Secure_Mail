@@ -8,7 +8,7 @@ Chế độ 1 — Stateful CLI (lệnh đơn, lưu phiên vào file):
   python -m securemail.main_client fetch
   python -m securemail.main_client list
   python -m securemail.main_client read <id>
-  python -m securemail.main_client recover [<share1> <share2>]
+  python -m securemail.main_client recover [<email>] [<share1> <share2>]
   python -m securemail.main_client status
 
 Chế độ 2 — Interactive Shell (REPL, phiên trong bộ nhớ):
@@ -46,6 +46,50 @@ def red(t: str) -> str: return _c("31", t)
 def bold(t: str) -> str: return _c("1", t)
 def cyan(t: str) -> str: return _c("36", t)
 def dim(t: str) -> str: return _c("2", t)
+
+
+def _print_usage():
+    print(__doc__.strip())
+
+
+def _usage_error(message: str, usage: str):
+    print(f"Error: {message}")
+    print(f"Usage: {usage}")
+    sys.exit(1)
+
+
+def _load_session_or_exit() -> dict:
+    ctx = client_core.load_session()
+    if ctx is None:
+        print("Error: No active session. Please login first.")
+        print("  python -m securemail.main_client login <email> <password>")
+        sys.exit(1)
+    return ctx
+
+
+def _parse_share_pair(values: list[str]) -> list[int] | None:
+    if not values:
+        return None
+    if len(values) != 2:
+        raise ValueError("expected exactly two share indices")
+    try:
+        shares = [int(values[0]), int(values[1])]
+    except ValueError as exc:
+        raise ValueError("share indices must be integers") from exc
+    if len(set(shares)) != 2 or any(i not in (1, 2, 3) for i in shares):
+        raise ValueError("share indices must be two distinct values from 1, 2, 3")
+    return shares
+
+
+def _parse_recover_args(args: list[str], default_email: str | None) -> tuple[str, list[int] | None]:
+    email = default_email
+    rest = args
+    if rest and "@" in rest[0]:
+        email = rest[0]
+        rest = rest[1:]
+    if email is None:
+        raise ValueError("no active session; email is required")
+    return email, _parse_share_pair(rest)
 
 
 def _security_badge(label: str) -> str:
@@ -117,6 +161,7 @@ def _print_message_detail(m: dict):
     print(f"\n{bold('══════════════════════════════════════════════════')}")
     print(f"  {bold('Message ID:')}   {m['id']}")
     print(f"  {bold('From:')}         {m.get('sender', '?')}")
+    print(f"  {bold('To:')}           {m.get('to') or m.get('recipient', '?')}")
     print(f"  {bold('Subject:')}      {m.get('subject', '(no subject)')}")
     print(f"  {bold('Date:')}         {m.get('date', '?')}")
     print(f"  {bold('Security:')}     {badge}")
@@ -145,16 +190,25 @@ def _print_message_detail(m: dict):
 def cli_main():
     """Dispatch a single CLI command, using the session file for auth."""
     cmd_name = sys.argv[1]
+    args = sys.argv[2:]
+
+    if cmd_name in ("help", "-h", "--help"):
+        _print_usage()
+        return
 
     # --- register (unchanged, no session needed) ---
     if cmd_name == "register":
-        email, password = sys.argv[2], sys.argv[3]
-        display = sys.argv[4] if len(sys.argv) > 4 else ""
+        if len(args) < 2:
+            _usage_error("missing email/password", "register <email> <password> [<display>]")
+        email, password = args[0], args[1]
+        display = args[2] if len(args) > 2 else ""
         client_core.register(email, password, display)
 
     # --- login: authenticate + save session ---
     elif cmd_name == "login":
-        email, password = sys.argv[2], sys.argv[3]
+        if len(args) != 2:
+            _usage_error("missing email/password", "login <email> <password>")
+        email, password = args[0], args[1]
         ctx = client_core.login(email, password)
         client_core.save_session(ctx)
         print(f"Logged in as {email}. Session saved.")
@@ -167,13 +221,11 @@ def cli_main():
 
     # --- send: use saved session ---
     elif cmd_name == "send":
-        ctx = client_core.load_session()
-        if ctx is None:
-            print("Error: No active session. Please login first.")
-            print("  python -m securemail.main_client login <email> <password>")
-            sys.exit(1)
-        to_addr = sys.argv[2]
-        subject = sys.argv[3] if len(sys.argv) > 3 else "(no subject)"
+        if not args:
+            _usage_error("missing recipient", "send <to> [<subject>]")
+        ctx = _load_session_or_exit()
+        to_addr = args[0]
+        subject = args[1] if len(args) > 1 else "(no subject)"
         print("Enter email body (end with Ctrl-Z on Windows / Ctrl-D on Unix):")
         body = sys.stdin.read()
         r = client_core.send_secure_email(ctx, [to_addr], subject, body)
@@ -183,35 +235,25 @@ def cli_main():
 
     # --- fetch: use saved session (legacy, full dump) ---
     elif cmd_name == "fetch":
-        ctx = client_core.load_session()
-        if ctx is None:
-            print("Error: No active session. Please login first.")
-            sys.exit(1)
+        ctx = _load_session_or_exit()
         msgs = client_core.fetch_inbox(ctx)
         _print_inbox(ctx["email"], msgs)
 
     # --- list: compact inbox listing with security status ---
     elif cmd_name == "list":
-        ctx = client_core.load_session()
-        if ctx is None:
-            print("Error: No active session. Please login first.")
-            sys.exit(1)
+        ctx = _load_session_or_exit()
         msgs = client_core.fetch_inbox(ctx)
         _print_inbox_list(ctx["email"], msgs)
 
     # --- read <id>: detailed single-message view ---
     elif cmd_name == "read":
-        ctx = client_core.load_session()
-        if ctx is None:
-            print("Error: No active session. Please login first.")
-            sys.exit(1)
-        if len(sys.argv) < 3:
-            print("Usage: read <id>")
-            sys.exit(1)
+        if len(args) != 1:
+            _usage_error("missing message id", "read <id>")
+        ctx = _load_session_or_exit()
         try:
-            msg_id = int(sys.argv[2])
+            msg_id = int(args[0])
         except ValueError:
-            print(f"Error: '{sys.argv[2]}' is not a valid message ID (must be integer).")
+            print(f"Error: '{args[0]}' is not a valid message ID (must be integer).")
             sys.exit(1)
         msg = client_core.fetch_message(ctx, msg_id)
         if msg is None:
@@ -222,30 +264,13 @@ def cli_main():
     # --- recover: key escrow recovery ---
     elif cmd_name == "recover":
         ctx = client_core.load_session()
-        email = None
-        shares = None
-        if ctx is not None:
-            email = ctx["email"]
-            if len(sys.argv) >= 4:
-                try:
-                    shares = [int(x) for x in sys.argv[2:4]]
-                except ValueError:
-                    pass
-        else:
-            if len(sys.argv) < 3:
-                print("Error: No active session. Usage:")
-                print("  python -m securemail.main_client recover <email> [<share1> <share2>]")
-                sys.exit(1)
-            email = sys.argv[2]
-            if len(sys.argv) >= 5:
-                try:
-                    shares = [int(sys.argv[3]), int(sys.argv[4])]
-                except ValueError:
-                    pass
+        default_email = ctx["email"] if ctx is not None else None
         try:
+            email, shares = _parse_recover_args(args, default_email)
             client_core.recover_user_key(email, shares)
         except Exception as exc:
             print(f"Recovery failed: {exc}")
+            print("Usage: recover [<email>] [<share1> <share2>]")
             sys.exit(1)
 
     # --- status: show who is logged in ---
@@ -259,7 +284,8 @@ def cli_main():
 
     else:
         print(f"Unknown command: {cmd_name}")
-        print(__doc__)
+        _print_usage()
+        sys.exit(1)
 
 
 # ======================================================================
@@ -282,6 +308,10 @@ class SecureMailShell(cmd.Cmd):
         self._ctx = None  # in-memory session context
         self._cached_msgs: dict[int, dict] = {}  # cache from last 'list'
 
+    def precmd(self, line: str) -> str:
+        """Normalize piped input from shells that prepend a UTF-8 BOM."""
+        return line.lstrip("\ufeff")
+
     # ------------------------------------------------------------------
     # login <email> <password>
     # ------------------------------------------------------------------
@@ -294,6 +324,7 @@ class SecureMailShell(cmd.Cmd):
         email, password = parts[0], parts[1]
         try:
             self._ctx = client_core.login(email, password)
+            self._cached_msgs = {}
             self.prompt = f"{email}> "
             print(f"Logged in as {email}.")
             print(f"  TGT length={len(self._ctx['tgt'])}")
@@ -310,6 +341,7 @@ class SecureMailShell(cmd.Cmd):
             return
         email = self._ctx["email"]
         self._ctx = None
+        self._cached_msgs = {}
         self.prompt = "securemail> "
         print(f"Logged out from {email}.")
 
@@ -418,31 +450,14 @@ class SecureMailShell(cmd.Cmd):
     def do_recover(self, line: str):
         """Recover escrowed private key: recover [<email>] [<share1> <share2>]"""
         parts = line.split()
-        email = None
-        shares = None
-        if self._ctx is not None:
-            email = self._ctx["email"]
-            if len(parts) >= 2:
-                try:
-                    shares = [int(x) for x in parts[:2]]
-                except ValueError:
-                    pass
-        else:
-            if not parts:
-                print("Error: Not logged in. Usage:")
-                print("  recover <email> [<share1> <share2>]")
-                return
-            email = parts[0]
-            if len(parts) >= 3:
-                try:
-                    shares = [int(x) for x in parts[1:3]]
-                except ValueError:
-                    pass
+        default_email = self._ctx["email"] if self._ctx is not None else None
         try:
+            email, shares = _parse_recover_args(parts, default_email)
             client_core.recover_user_key(email, shares)
             print(f"Key for {email} recovered successfully.")
         except Exception as exc:
             print(f"Recovery failed: {exc}")
+            print("Usage: recover [<email>] [<share1> <share2>]")
 
     # ------------------------------------------------------------------
     # status
