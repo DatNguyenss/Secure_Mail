@@ -16,7 +16,6 @@ Protocol:
 import base64
 import json
 import socket
-import sqlite3
 import threading
 import traceback
 from pathlib import Path
@@ -30,11 +29,11 @@ from securemail.ticket_service import authenticator as auth_mod
 from securemail.ticket_service import ts_client
 from securemail.ticket_service.as_tgs_server import MAIL_SRV_NAME
 from securemail.auth import access_control
+from securemail.db_conn import get_conn
 
 
 POP_HOST = "127.0.0.1"
 POP_PORT = 1100
-MAIL_DB = Path("data/mail/mailstore.db")
 SRV_REPLAY = auth_mod.ReplayCache(window_seconds=300)
 
 
@@ -110,15 +109,17 @@ def _handle(conn: socket.socket, addr):
                     if auth_ctx:
                         log_event("POP3_FORBIDDEN", f"user={auth_ctx['id_c']} action=pop3.fetch")
                     continue
-                conn2 = sqlite3.connect(MAIL_DB)
-                rows = conn2.execute(
+                db = get_conn()
+                cursor = db.cursor()
+                cursor.execute(
                     "SELECT id, sender, received_at, dmarc_action, spf_result, dkim_result "
-                    "FROM mailbox WHERE recipient=? AND fetched=0 ORDER BY id",
+                    "FROM mail.mailbox WHERE recipient=%s AND fetched=0 ORDER BY id",
                     (auth_ctx["id_c"],),
-                ).fetchall()
-                conn2.close()
+                )
+                rows = cursor.fetchall()
+                db.close()
                 s({"ok": True, "messages": [
-                    {"id": r[0], "sender": r[1], "received_at": r[2],
+                    {"id": r[0], "sender": r[1], "received_at": str(r[2]),
                      "dmarc_action": r[3], "spf_result": r[4], "dkim_result": r[5]}
                     for r in rows]})
 
@@ -126,18 +127,20 @@ def _handle(conn: socket.socket, addr):
                 if not auth_ctx:
                     s({"ok": False, "error": "auth"})
                     continue
-                conn2 = sqlite3.connect(MAIL_DB)
-                row = conn2.execute(
+                db = get_conn()
+                cursor = db.cursor()
+                cursor.execute(
                     "SELECT sender, envelope, headers_json, dmarc_action, spf_result, dkim_result "
-                    "FROM mailbox WHERE id=? AND recipient=?",
+                    "FROM mail.mailbox WHERE id=%s AND recipient=%s",
                     (msg["id"], auth_ctx["id_c"]),
-                ).fetchone()
-                conn2.close()
+                )
+                row = cursor.fetchone()
+                db.close()
                 if not row:
                     s({"ok": False, "error": "not found"})
                     continue
                 log_event("POP3_RETR", f"user={auth_ctx['id_c']} msg_id={msg['id']}")
-                s({"ok": True, "sender": row[0], "envelope_b64": b64(row[1]),
+                s({"ok": True, "sender": row[0], "envelope_b64": b64(bytes(row[1])),
                    "headers": json.loads(row[2]),
                    "dmarc_action": row[3], "spf_result": row[4], "dkim_result": row[5]})
 
@@ -145,13 +148,50 @@ def _handle(conn: socket.socket, addr):
                 if not auth_ctx:
                     s({"ok": False, "error": "auth"})
                     continue
-                conn2 = sqlite3.connect(MAIL_DB)
-                conn2.execute("UPDATE mailbox SET fetched=1 WHERE id=? AND recipient=?",
+                db = get_conn()
+                cursor = db.cursor()
+                cursor.execute("UPDATE mail.mailbox SET fetched=1 WHERE id=%s AND recipient=%s",
                               (msg["id"], auth_ctx["id_c"]))
-                conn2.commit()
-                conn2.close()
+                db.close()
                 log_event("POP3_DELE", f"user={auth_ctx['id_c']} msg_id={msg['id']}")
                 s({"ok": True})
+
+            elif op == "LIST_SENT":
+                if not auth_ctx or not access_control.allowed(auth_ctx["role"], "pop3.fetch"):
+                    s({"ok": False, "error": "forbidden"})
+                    continue
+                db = get_conn()
+                cursor = db.cursor()
+                cursor.execute(
+                    "SELECT id, recipient, received_at, headers_json "
+                    "FROM mail.mailbox WHERE sender=%s ORDER BY id DESC",
+                    (auth_ctx["id_c"],),
+                )
+                rows = cursor.fetchall()
+                db.close()
+                s({"ok": True, "messages": [
+                    {"id": r[0], "recipient": r[1], "received_at": str(r[2]),
+                     "headers": json.loads(r[3]) if r[3] else {}}
+                    for r in rows]})
+
+            elif op == "RETR_SENT":
+                if not auth_ctx:
+                    s({"ok": False, "error": "auth"})
+                    continue
+                db = get_conn()
+                cursor = db.cursor()
+                cursor.execute(
+                    "SELECT recipient, headers_json "
+                    "FROM mail.mailbox WHERE id=%s AND sender=%s",
+                    (msg["id"], auth_ctx["id_c"]),
+                )
+                row = cursor.fetchone()
+                db.close()
+                if not row:
+                    s({"ok": False, "error": "not found"})
+                    continue
+                log_event("POP3_RETR_SENT", f"user={auth_ctx['id_c']} msg_id={msg['id']}")
+                s({"ok": True, "recipient": row[0], "headers": json.loads(row[1]) if row[1] else {}})
 
             elif op == "QUIT":
                 s({"ok": True, "bye": True})
@@ -165,7 +205,6 @@ def _handle(conn: socket.socket, addr):
 
 
 def serve():
-    MAIL_DB.parent.mkdir(parents=True, exist_ok=True)
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((POP_HOST, POP_PORT))

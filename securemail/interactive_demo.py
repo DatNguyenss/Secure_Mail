@@ -14,7 +14,7 @@ import datetime as dt
 import json
 import os
 import socket
-import sqlite3
+from securemail.db_conn import get_conn
 import sys
 import textwrap
 import time
@@ -919,10 +919,10 @@ def interactive_scenario_5():
         'conn.execute("INSERT INTO spf VALUES (?, ?)", ("mail.local", "10.9.9.9"))'
     )
     wait()
-    conn = sqlite3.connect("data/policy/policy.db")
-    conn.execute("DELETE FROM spf WHERE domain=?", (DOMAIN,))
-    conn.execute("INSERT INTO spf(domain, ip) VALUES (?, ?)", (DOMAIN, "10.9.9.9"))
-    conn.commit()
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM policy.spf WHERE domain=%s", (DOMAIN,))
+    cursor.execute("INSERT INTO policy.spf(domain, ip) VALUES (%s, %s)", (DOMAIN, "10.9.9.9"))
     conn.close()
     info("New SPF", "10.9.9.9 (localhost 127.0.0.1 is now UNAUTHORIZED)")
     warn("SPF tampered -- any send from localhost will fail SPF check")
@@ -1016,10 +1016,10 @@ def interactive_scenario_5():
         'conn.execute("INSERT INTO spf VALUES (?, ?)", ("mail.local", "127.0.0.1"))'
     )
     wait()
-    conn = sqlite3.connect("data/policy/policy.db")
-    conn.execute("DELETE FROM spf WHERE domain=?", (DOMAIN,))
-    conn.execute("INSERT INTO spf(domain, ip) VALUES (?, ?)", (DOMAIN, "127.0.0.1"))
-    conn.commit()
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM policy.spf WHERE domain=%s", (DOMAIN,))
+    cursor.execute("INSERT INTO policy.spf(domain, ip) VALUES (%s, %s)", (DOMAIN, "127.0.0.1"))
     conn.close()
     success("SPF restored to 127.0.0.1")
     step_end()

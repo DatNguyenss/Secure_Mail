@@ -2,11 +2,9 @@
 
 Cài Shamir thủ công trên GF(256) để không cần thêm dependency.
 """
-import os
 import secrets
-from pathlib import Path
 
-ESCROW_DIR = Path("data/ca/escrow")
+from securemail.db_conn import get_conn
 
 
 # --- Shamir Secret Sharing on GF(256) ---
@@ -107,22 +105,38 @@ def combine_shares(shares: list[tuple[int, bytes]]) -> bytes:
     return bytes(out)
 
 
-# --- Escrow API ---
+# --- Escrow API (SQL Server) ---
 def escrow_key(user_email: str, encryption_priv_pem: bytes):
-    """Split + lưu 3 share vào 3 file riêng."""
-    ESCROW_DIR.mkdir(parents=True, exist_ok=True)
+    """Split + lưu 3 share vào ca.escrow_shares trong SQL Server."""
     shares = split_secret(encryption_priv_pem, threshold=2, shares=3)
+    conn = get_conn()
+    cursor = conn.cursor()
+    # Remove old shares (if re-escrowing)
+    cursor.execute("DELETE FROM ca.escrow_shares WHERE email = %s", (user_email,))
     for idx, data in shares:
-        path = ESCROW_DIR / f"{user_email.replace('@','_at_')}.share{idx}.bin"
-        path.write_bytes(data)
+        cursor.execute(
+            "INSERT INTO ca.escrow_shares(email, share_index, share_data) VALUES (%s, %s, %s)",
+            (user_email, idx, bytearray(data)),
+        )
+    conn.close()
     print(f"[Escrow] Split key for {user_email} into 3 shares (threshold 2)")
 
 
 def recover_key(user_email: str, share_indices: list[int]) -> bytes:
     if len(share_indices) < 2:
         raise ValueError("Cần ít nhất 2 share")
+    conn = get_conn()
+    cursor = conn.cursor()
     shares = []
     for i in share_indices:
-        path = ESCROW_DIR / f"{user_email.replace('@','_at_')}.share{i}.bin"
-        shares.append((i, path.read_bytes()))
+        cursor.execute(
+            "SELECT share_data FROM ca.escrow_shares WHERE email = %s AND share_index = %s",
+            (user_email, i),
+        )
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            raise FileNotFoundError(f"Share {i} for {user_email} not found in database")
+        shares.append((i, bytes(row[0])))
+    conn.close()
     return combine_shares(shares)

@@ -1,0 +1,27 @@
+# Environment variables
+.env
+
+# Data folder (contains keys, DBs, generated test files)
+data/
+*.db
+*.sqlite3
+
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE and Editor folders
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Virtual Environments
+venv/
+.env/
+env/
+
+# System files
+.DS_Store
+Thumbs.db

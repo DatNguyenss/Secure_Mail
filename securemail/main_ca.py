@@ -7,9 +7,9 @@ Usage:
   python -m securemail.main_ca escrow <email>               # xem 3 share trong data/ca/escrow
 """
 import sys
-import sqlite3
 
 from securemail.ca_service import ca_server, ca_core, key_escrow
+from securemail.db_conn import get_conn
 
 
 def main():
@@ -22,12 +22,13 @@ def main():
     elif cmd == "revoke":
         ca_core.revoke_cert(sys.argv[2])
     elif cmd == "list":
-        ca_core._ensure_db()
-        conn = sqlite3.connect(ca_core.CA_DB)
-        for row in conn.execute(
-            "SELECT serial, email, status, not_after FROM issued"
-        ).fetchall():
-            print(f"  {row[0]:20s} {row[1]:30s} {row[2]:10s} {row[3]}")
+        conn = get_conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT serial, email, status, not_after FROM ca.issued"
+        )
+        for row in cursor.fetchall():
+            print(f"  {str(row[0]):20s} {str(row[1]):30s} {str(row[2]):10s} {str(row[3])}")
         conn.close()
     elif cmd == "escrow":
         email = sys.argv[2]

@@ -17,7 +17,6 @@ import base64
 import datetime as dt
 import json
 import socket
-import sqlite3
 import threading
 import time
 import traceback
@@ -34,63 +33,40 @@ from securemail.ticket_service.as_tgs_server import MAIL_SRV_NAME
 from securemail.auth import access_control
 from securemail.mail import dkim_signer, mime_lite
 from securemail.policy import spf_checker, dmarc_engine
+from securemail.db_conn import get_conn
 
 
 SMTP_HOST = "127.0.0.1"
 SMTP_PORT = 2525
 DOMAIN = "mail.local"
 
-MAIL_DIR = Path("data/mail")
-MAIL_DB = MAIL_DIR / "mailstore.db"
 SRV_REPLAY = auth_mod.ReplayCache(window_seconds=300)
 
 
-def _ensure_db():
-    MAIL_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(MAIL_DB)
-    conn.executescript("""
-    CREATE TABLE IF NOT EXISTS mailbox (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        recipient TEXT NOT NULL,
-        sender TEXT,
-        received_at TEXT,
-        envelope BLOB,
-        headers_json TEXT,
-        dmarc_action TEXT,
-        spf_result TEXT,
-        dkim_result TEXT,
-        fetched INTEGER DEFAULT 0
-    );
-    CREATE INDEX IF NOT EXISTS idx_recipient ON mailbox(recipient, fetched);
-    CREATE TABLE IF NOT EXISTS server_log (
-        ts TEXT, event TEXT, details TEXT
-    );
-    """)
-    conn.commit()
-    conn.close()
-
-
 def log_event(event: str, details: str = ""):
-    _ensure_db()
-    conn = sqlite3.connect(MAIL_DB)
-    conn.execute("INSERT INTO server_log(ts, event, details) VALUES (?, ?, ?)",
-                 (dt.datetime.now(dt.timezone.utc).isoformat(), event, details))
-    conn.commit()
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO mail.server_log(ts, event, details) VALUES (%s, %s, %s)",
+        (dt.datetime.now(dt.timezone.utc), event, details),
+    )
     conn.close()
 
 
 def store_mail(recipient: str, sender: str, envelope: bytes, headers: dict,
                dmarc_action: str, spf_result: str, dkim_result: str) -> int:
-    _ensure_db()
-    conn = sqlite3.connect(MAIL_DB)
-    cur = conn.execute(
-        "INSERT INTO mailbox(recipient, sender, received_at, envelope, headers_json, "
-        "dmarc_action, spf_result, dkim_result) VALUES (?,?,?,?,?,?,?,?)",
-        (recipient, sender, dt.datetime.now(dt.timezone.utc).isoformat(),
-         envelope, json.dumps(headers), dmarc_action, spf_result, dkim_result),
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO mail.mailbox(recipient, sender, received_at, envelope, headers_json, "
+        "dmarc_action, spf_result, dkim_result, fetched) "
+        "OUTPUT INSERTED.id "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 0)",
+        (recipient, sender, dt.datetime.now(dt.timezone.utc),
+         bytearray(envelope), json.dumps(headers), dmarc_action, spf_result, dkim_result),
     )
-    mid = cur.lastrowid
-    conn.commit()
+    row = cursor.fetchone()
+    mid = row[0]
     conn.close()
     return mid
 
@@ -267,7 +243,6 @@ def _load_server_privkey():
 
 
 def serve():
-    _ensure_db()
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((SMTP_HOST, SMTP_PORT))

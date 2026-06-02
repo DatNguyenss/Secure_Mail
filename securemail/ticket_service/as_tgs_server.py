@@ -12,14 +12,13 @@ import datetime as dt
 import json
 import os
 import socket
-import sqlite3
 import threading
 import time
 import traceback
-from pathlib import Path
 
 from securemail.network.json_framing import send_json, recv_json, b64, unb64
 from securemail.crypto.aes_handler import aes_gcm_encrypt, aes_gcm_decrypt, random_key
+from securemail.db_conn import get_conn
 from . import ticket as ticket_mod
 from . import authenticator as auth_mod
 
@@ -27,11 +26,8 @@ from . import authenticator as auth_mod
 TS_HOST = "127.0.0.1"
 TS_PORT = 9002
 
-TS_DIR = Path("data/ticket")
-TS_DB = TS_DIR / "ticket.db"
-
 # Service keys — shared between Ticket Service and corresponding service
-# Trong demo: sinh và lưu trong SQLite, server khác đọc chung file.
+# Trong demo: sinh và lưu trong SQL Server, server khác đọc qua API.
 TGS_NAME = "tgs/securemail"
 MAIL_SRV_NAME = "mail/securemail"
 
@@ -40,51 +36,27 @@ TGT_LIFETIME = 8 * 3600       # 8 hours
 SVC_LIFETIME = 30 * 60        # 30 minutes
 
 
-def _ensure_db():
-    TS_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(TS_DB)
-    conn.executescript("""
-    CREATE TABLE IF NOT EXISTS principals (
-        id_c TEXT PRIMARY KEY,
-        salt BLOB,
-        kc   BLOB,
-        role TEXT DEFAULT 'user'
-    );
-    CREATE TABLE IF NOT EXISTS service_keys (
-        id_v TEXT PRIMARY KEY,
-        kv   BLOB
-    );
-    CREATE TABLE IF NOT EXISTS revoked_tgts (
-        tgt_hash TEXT PRIMARY KEY,
-        revoked_at TEXT
-    );
-    CREATE TABLE IF NOT EXISTS audit_log (ts TEXT, event TEXT, details TEXT);
-    """)
-    conn.commit()
-    conn.close()
-
-
 def _audit(event: str, details: str = ""):
-    """Ghi một dòng audit log vào SQLite."""
-    conn = sqlite3.connect(TS_DB)
-    conn.execute(
-        "INSERT INTO audit_log(ts, event, details) VALUES (?, ?, ?)",
-        (dt.datetime.now(dt.timezone.utc).isoformat(), event, details),
+    """Ghi một dòng audit log vào SQL Server."""
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO ticket.audit_log(ts, event, details) VALUES (%s, %s, %s)",
+        (dt.datetime.now(dt.timezone.utc), event, details),
     )
-    conn.commit()
     conn.close()
 
 
 def _get_or_create_service_key(id_v: str) -> bytes:
-    _ensure_db()
-    conn = sqlite3.connect(TS_DB)
-    row = conn.execute("SELECT kv FROM service_keys WHERE id_v=?", (id_v,)).fetchone()
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT kv FROM ticket.service_keys WHERE id_v=%s", (id_v,))
+    row = cursor.fetchone()
     if row:
         conn.close()
-        return row[0]
+        return bytes(row[0])
     kv = random_key(32)
-    conn.execute("INSERT INTO service_keys(id_v, kv) VALUES (?, ?)", (id_v, kv))
-    conn.commit()
+    cursor.execute("INSERT INTO ticket.service_keys(id_v, kv) VALUES (%s, %s)", (id_v, bytearray(kv)))
     conn.close()
     return kv
 
@@ -95,26 +67,34 @@ def get_service_key(id_v: str) -> bytes:
 
 
 def register_principal(id_c: str, salt: bytes, kc: bytes, role: str = "user"):
-    _ensure_db()
-    conn = sqlite3.connect(TS_DB)
-    conn.execute(
-        "INSERT INTO principals(id_c, salt, kc, role) VALUES (?, ?, ?, ?) "
-        "ON CONFLICT(id_c) DO UPDATE SET salt=excluded.salt, kc=excluded.kc, role=excluded.role",
-        (id_c, salt, kc, role),
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute(
+        """MERGE INTO ticket.principals AS target
+        USING (SELECT %s AS id_c) AS source
+        ON target.id_c = source.id_c
+        WHEN MATCHED THEN
+            UPDATE SET salt = %s, kc = %s, role = %s
+        WHEN NOT MATCHED THEN
+            INSERT (id_c, salt, kc, role) VALUES (%s, %s, %s, %s);""",
+        (id_c,
+         bytearray(salt), bytearray(kc), role,
+         id_c, bytearray(salt), bytearray(kc), role),
     )
-    conn.commit()
     conn.close()
     _audit("REGISTER_PRINCIPAL", f"id_c={id_c} role={role}")
     print(f"[TS] Registered principal {id_c} role={role}")
 
 
 def _get_principal(id_c: str) -> dict | None:
-    conn = sqlite3.connect(TS_DB)
-    row = conn.execute("SELECT id_c, salt, kc, role FROM principals WHERE id_c=?", (id_c,)).fetchone()
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id_c, salt, kc, role FROM ticket.principals WHERE id_c=%s", (id_c,))
+    row = cursor.fetchone()
     conn.close()
     if not row:
         return None
-    return {"id_c": row[0], "salt": row[1], "kc": row[2], "role": row[3]}
+    return {"id_c": row[0], "salt": bytes(row[1]), "kc": bytes(row[2]), "role": row[3]}
 
 
 def _seal_for_user(kc: bytes, payload: dict) -> str:
@@ -243,7 +223,6 @@ def _handle(conn: socket.socket, addr):
 
 
 def serve():
-    _ensure_db()
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((TS_HOST, TS_PORT))

@@ -1,7 +1,6 @@
 """Root CA: tạo Root cert, ký CSR (X.509v3 với extensions), thu hồi cert."""
 import datetime as dt
 import os
-import sqlite3
 from pathlib import Path
 from cryptography import x509
 from cryptography.x509.oid import NameOID, ExtensionOID
@@ -9,50 +8,29 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from securemail.crypto import rsa_handler
+from securemail.db_conn import get_conn
 
 
 CA_DIR = Path("data/ca")
-CA_DB = CA_DIR / "ca.db"
 CA_KEY_FILE = CA_DIR / "ca_key.pem"
 CA_CERT_FILE = CA_DIR / "ca_cert.pem"
 CA_PASSPHRASE = os.environ.get("CA_PASSPHRASE", "securemail-root-ca-2026").encode("utf-8")
 
 
-def _ensure_db():
-    CA_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(CA_DB)
-    conn.executescript("""
-    CREATE TABLE IF NOT EXISTS issued (
-        serial TEXT PRIMARY KEY,
-        email TEXT,
-        subject TEXT,
-        not_before TEXT,
-        not_after TEXT,
-        cert_pem BLOB,
-        status TEXT DEFAULT 'good',  -- good | revoked
-        revoked_at TEXT
-    );
-    CREATE INDEX IF NOT EXISTS idx_email ON issued(email);
-    CREATE TABLE IF NOT EXISTS audit_log (ts TEXT, event TEXT, details TEXT);
-    """)
-    conn.commit()
-    conn.close()
-
-
 def _audit(event: str, details: str = ""):
-    """Ghi một dòng audit log vào SQLite."""
-    conn = sqlite3.connect(CA_DB)
-    conn.execute(
-        "INSERT INTO audit_log(ts, event, details) VALUES (?, ?, ?)",
-        (dt.datetime.now(dt.timezone.utc).isoformat(), event, details),
+    """Ghi một dòng audit log vào SQL Server."""
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO ca.audit_log(ts, event, details) VALUES (%s, %s, %s)",
+        (dt.datetime.now(dt.timezone.utc), event, details),
     )
-    conn.commit()
     conn.close()
 
 
 def init_root_ca(common_name: str = "SecureMail Root CA", org: str = "SecureMail Demo"):
     """Tạo Root CA lần đầu. Idempotent."""
-    _ensure_db()
+    CA_DIR.mkdir(parents=True, exist_ok=True)
     if CA_KEY_FILE.exists() and CA_CERT_FILE.exists():
         return  # đã có
     priv = rsa_handler.generate_keypair(2048)
@@ -97,7 +75,6 @@ def load_ca() -> tuple[rsa.RSAPrivateKey, x509.Certificate]:
 
 def sign_csr(csr_pem: bytes, email: str, days_valid: int = 365) -> bytes:
     """Ký CSR, trả về cert PEM. Ghi DB."""
-    _ensure_db()
     csr = x509.load_pem_x509_csr(csr_pem)
     if not csr.is_signature_valid:
         raise ValueError("CSR signature invalid")
@@ -153,15 +130,15 @@ def sign_csr(csr_pem: bytes, email: str, days_valid: int = 365) -> bytes:
     )
     cert_pem = cert.public_bytes(serialization.Encoding.PEM)
 
-    conn = sqlite3.connect(CA_DB)
-    conn.execute(
-        "INSERT INTO issued(serial, email, subject, not_before, not_after, cert_pem) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO ca.issued(serial, email, subject, not_before, not_after, cert_pem) "
+        "VALUES (%s, %s, %s, %s, %s, %s)",
         (hex(serial), email, csr.subject.rfc4514_string(),
-         cert.not_valid_before_utc.isoformat(), cert.not_valid_after_utc.isoformat(),
-         cert_pem),
+         cert.not_valid_before_utc, cert.not_valid_after_utc,
+         bytearray(cert_pem)),
     )
-    conn.commit()
     conn.close()
     _audit("SIGN_CSR", f"email={email} serial={hex(serial)}")
     print(f"[CA] Signed cert for {email}, serial={hex(serial)}")
@@ -169,12 +146,13 @@ def sign_csr(csr_pem: bytes, email: str, days_valid: int = 365) -> bytes:
 
 
 def revoke_cert(serial_hex: str) -> bool:
-    _ensure_db()
-    conn = sqlite3.connect(CA_DB)
-    cur = conn.execute("UPDATE issued SET status='revoked', revoked_at=? WHERE serial=?",
-                       (dt.datetime.now(dt.timezone.utc).isoformat(), serial_hex))
-    conn.commit()
-    ok = cur.rowcount > 0
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE ca.issued SET status='revoked', revoked_at=%s WHERE serial=%s",
+        (dt.datetime.now(dt.timezone.utc), serial_hex),
+    )
+    ok = cursor.rowcount > 0
     conn.close()
     if ok:
         _audit("REVOKE", f"serial={serial_hex}")
@@ -183,19 +161,21 @@ def revoke_cert(serial_hex: str) -> bool:
 
 
 def list_revoked() -> list[dict]:
-    _ensure_db()
-    conn = sqlite3.connect(CA_DB)
-    rows = conn.execute(
-        "SELECT serial, revoked_at FROM issued WHERE status='revoked'"
-    ).fetchall()
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT serial, revoked_at FROM ca.issued WHERE status='revoked'"
+    )
+    rows = cursor.fetchall()
     conn.close()
     return [{"serial": s, "revoked_at": r} for s, r in rows]
 
 
 def check_status(serial_hex: str) -> str:
-    _ensure_db()
-    conn = sqlite3.connect(CA_DB)
-    row = conn.execute("SELECT status FROM issued WHERE serial=?", (serial_hex,)).fetchone()
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT status FROM ca.issued WHERE serial=%s", (serial_hex,))
+    row = cursor.fetchone()
     conn.close()
     if not row:
         return "unknown"

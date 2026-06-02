@@ -1,25 +1,29 @@
 """DMARC-lite: kết hợp SPF + DKIM → áp policy none/quarantine/reject."""
-import sqlite3
-from .spf_checker import POLICY_DB, _ensure_db
+from securemail.db_conn import get_conn
 
 
 def set_policy(domain: str, policy: str):
     assert policy in ("none", "quarantine", "reject")
-    _ensure_db()
-    conn = sqlite3.connect(POLICY_DB)
-    conn.execute(
-        "INSERT INTO dmarc(domain, policy) VALUES (?, ?) "
-        "ON CONFLICT(domain) DO UPDATE SET policy=excluded.policy",
-        (domain, policy),
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute(
+        """MERGE INTO policy.dmarc AS target
+        USING (SELECT %s AS domain) AS source
+        ON target.domain = source.domain
+        WHEN MATCHED THEN
+            UPDATE SET policy = %s
+        WHEN NOT MATCHED THEN
+            INSERT (domain, policy) VALUES (%s, %s);""",
+        (domain, policy, domain, policy),
     )
-    conn.commit()
     conn.close()
 
 
 def get_policy(domain: str) -> str:
-    _ensure_db()
-    conn = sqlite3.connect(POLICY_DB)
-    row = conn.execute("SELECT policy FROM dmarc WHERE domain=?", (domain,)).fetchone()
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT policy FROM policy.dmarc WHERE domain=%s", (domain,))
+    row = cursor.fetchone()
     conn.close()
     return row[0] if row else "none"
 

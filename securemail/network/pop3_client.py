@@ -63,6 +63,21 @@ class Pop3Client:
             "dkim_result": r["dkim_result"],
         }
 
+    def list_sent(self) -> list[dict]:
+        self._s({"op": "LIST_SENT"})
+        r = self._r()
+        return r.get("messages", [])
+
+    def retr_sent(self, mid: int) -> dict | None:
+        self._s({"op": "RETR_SENT", "id": mid})
+        r = self._r()
+        if not r.get("ok"):
+            return None
+        return {
+            "recipient": r.get("recipient", ""),
+            "headers": r.get("headers", {}),
+        }
+
     def dele(self, mid: int):
         self._s({"op": "DELE", "id": mid})
         self._r()

@@ -18,6 +18,8 @@ Chạy trực tiếp từ shell hệ thống, tự động lưu và tải phiên
 | `python -m securemail.main_client send <to> <subject>` | Gửi email bảo mật (nội dung nhập từ stdin, kết thúc bằng `Ctrl-D`/`Ctrl-Z`). |
 | `python -m securemail.main_client list` | **[MỚI]** Liệt kê bảng rút gọn inbox có nhãn bảo mật màu (`SECURE`, `WARNING`, `DANGEROUS`). |
 | `python -m securemail.main_client read <id>` | **[MỚI]** Xem chi tiết nội dung giải mã và chứng thực của một email cụ thể theo ID. |
+| `python -m securemail.main_client sent` | **[MỚI]** Liệt kê bảng rút gọn các email đã gửi ra (Sent Mails). |
+| `python -m securemail.main_client read_sent <id>` | **[MỚI]** Xem metadata của email đã gửi. |
 | `python -m securemail.main_client fetch` | Tải và giải mã toàn bộ inbox (giao diện legacy, dump toàn bộ thư). |
 | `python -m securemail.main_client recover [<email>] [<share1> <share2>]` | Khôi phục khóa riêng bằng cơ chế Shamir Secret Sharing (2-of-3). Nếu chưa đăng nhập, bắt buộc truyền vào `<email>`. |
 | `python -m securemail.main_client logout` | Đăng xuất, xóa file session cục bộ. |
@@ -36,11 +38,50 @@ Phiên làm việc được giữ trực tiếp trong bộ nhớ (In-Memory).
 | `send <to> [<subject>]` | Gửi email bảo mật (gõ các dòng nội dung, ấn Enter dòng trống hoặc `Ctrl-D` để gửi). |
 | `list` | **[MỚI]** Tải inbox và hiển thị danh sách thư rút gọn kèm nhãn bảo mật. Đồng thời cache kết quả. |
 | `read <id>` | **[MỚI]** Xem chi tiết email cụ thể theo ID (đọc nhanh từ cache nếu đã chạy `list`, hoặc fetch POP3). |
+| `sent` | **[MỚI]** Hiển thị danh sách các email đã gửi ra. Đồng thời cache kết quả. |
+| `read_sent <id>` | **[MỚI]** Xem metadata email đã gửi cụ thể theo ID (từ cache hoặc qua POP3). |
 | `fetch` | Tải và giải mã hiển thị toàn bộ inbox (legacy view). |
 | `recover [<email>] [<share1> <share2>]` | Khôi phục khóa riêng bằng Shamir từ REPL. Nếu chưa đăng nhập, bắt buộc truyền vào `<email>`. |
 | `logout` | Đăng xuất người dùng hiện tại, prompt quay lại thành `securemail> `. |
 | `help` / `help <lệnh>` | Hiển thị trợ giúp của REPL hoặc chi tiết cách dùng một lệnh. |
 | `exit` / `quit` | Thoát chế độ Interactive Shell (REPL). |
+
+---
+
+## [2026-06-02] — Thêm chức năng xem lại Email đã gửi (Sent Mails)
+
+### 🎯 Mục tiêu
+Cho phép người gửi xem lại lịch sử các email đã được gửi ra khỏi hệ thống (Sent Mails) thay vì chỉ có thể đọc Inbox như trước đây. Do cơ chế mã hóa S/MIME mã hóa toàn bộ nội dung (Body) bằng Public Key của người nhận, nên tính năng này chỉ cho phép xem metadata (Tiêu đề, Người nhận, Thời gian) và ngăn chặn việc đọc lại Body để đảm bảo an toàn tuyệt đối.
+
+### 📁 File thay đổi
+- `securemail/network/pop3_server.py`: Bổ sung thêm API `LIST_SENT` và `RETR_SENT` cho server.
+- `securemail/network/pop3_client.py`: Thêm phương thức gọi tương ứng.
+- `securemail/client_core.py`: Bổ sung hàm `fetch_sent_list` và `fetch_sent_message`.
+- `securemail/main_client.py`: Bổ sung lệnh `sent` và `read_sent <id>` vào chế độ dòng lệnh đơn và REPL Shell.
+
+---
+
+## [2026-06-02] — Migrate Database from SQLite/Flat-files to Microsoft SQL Server
+
+### 🎯 Mục tiêu
+Chuyển đổi toàn bộ kiến trúc lưu trữ dữ liệu của hệ thống SecureMail từ các file SQLite rời rạc (`ca.db`, `kds.db`, `ticket.db`, `policy.db`, `mailstore.db`) và các file nhị phân (flat binary files lưu khóa chia sẻ Shamir) sang một cơ sở dữ liệu **Microsoft SQL Server** tập trung duy nhất (`SecureMail`).
+
+### 📁 File thay đổi
+- **Tạo mới**:
+  - `.env` — Lưu trữ thông tin kết nối SQL Server (host, port, db name, user, password).
+  - `securemail/db_conn.py` — Tiện ích kết nối tập trung sử dụng `pymssql` cho tất cả các service.
+- **Cập nhật (12 files)**:
+  - `securemail/requirements.txt`: Thêm `pymssql` và `python-dotenv`.
+  - Toàn bộ các service (`ca_core.py`, `key_store.py`, `as_tgs_server.py`, `spf_checker.py`, `dmarc_engine.py`, `smtp_server.py`, `pop3_server.py`, `view_logs.py` v.v...) đã được xóa bỏ các truy vấn `sqlite3`.
+
+### ⚡ Các thay đổi Kỹ thuật Chính (Technical Changes)
+- **Cấu trúc Schema**: Database được gom nhóm gọn gàng theo schemas của SQL Server (`ca.*`, `kds.*`, `ticket.*`, `policy.*`, `mail.*`).
+- **SQL Dialect**:
+  - Chuyển đổi `ON CONFLICT DO UPDATE` (SQLite) sang `MERGE INTO` (SQL Server).
+  - Chuyển đổi `INSERT OR IGNORE` sang luồng `IF NOT EXISTS ... INSERT`.
+  - Thay thế `cursor.lastrowid` bằng mệnh đề `OUTPUT INSERTED.id`.
+- **Lưu trữ nhị phân (VARBINARY Fix)**: Cập nhật cơ chế wrap dữ liệu dạng `bytes` thành `bytearray()` trước khi truyền vào `pymssql` để SQL Server hiểu đúng định dạng `VARBINARY(MAX)` thay vì `VARCHAR`.
+- **Lưu trữ Shamir Shares**: Thay vì lưu khóa bị chia sẻ (Shamir Secret Sharing) dưới dạng nhiều file `.bin` rời rạc trên đĩa, toàn bộ share nay được mã hóa và lưu trực tiếp vào bảng `ca.escrow_shares`.
 
 ---
 
@@ -136,7 +177,7 @@ Trước khi chạy bất kỳ kịch bản nào, hãy mở 4 Terminal độc l�
 
 - **Bước 1**: Thu hồi chứng chỉ hiện tại của Alice ở phía CA bằng cách chạy script API thu hồi:
   ```bash
-  python -c "from securemail.network.json_framing import request; import sqlite3; conn=sqlite3.connect('data/ca/ca.db'); res=conn.execute('SELECT serial FROM certificates WHERE email=\'alice@mail.local\' ORDER BY id DESC').fetchone(); serial=hex(res[0]); print('Revoking Alice cert:', serial); request('127.0.0.1', 9000, {'op': 'ca.revoke', 'serial_hex': serial})"
+  python -c "from securemail.network.json_framing import request; from securemail.db_conn import get_conn; conn=get_conn(); cursor=conn.cursor(); cursor.execute(\"SELECT serial FROM ca.issued WHERE email='alice@mail.local'\"); res=cursor.fetchone(); serial=res[0]; print('Revoking Alice cert:', serial); request('127.0.0.1', 9000, {'op': 'ca.revoke', 'serial_hex': serial})"
   ```
 - **Bước 2**: Đồng bộ CRL (danh sách chứng chỉ bị thu hồi) lên KDS:
   ```bash
@@ -161,7 +202,7 @@ Trước khi chạy bất kỳ kịch bản nào, hãy mở 4 Terminal độc l�
 
 - **Bước 1**: Đổi SPF của domain `mail.local` sang một IP khác (ví dụ: `10.9.9.9`) để giả lập thư gửi đến từ IP ngoài danh sách SPF:
   ```bash
-  python -c "import sqlite3; conn=sqlite3.connect('data/policy/policy.db'); conn.execute('UPDATE spf SET ip=\'10.9.9.9\' WHERE domain=\'mail.local\''); conn.commit()"
+  python -c "from securemail.db_conn import get_conn; conn=get_conn(); cursor=conn.cursor(); cursor.execute(\"UPDATE policy.spf SET ip='10.9.9.9' WHERE domain='mail.local'\"); conn.close()"
   ```
 - **Bước 2**: Đăng nhập dưới tư cách kẻ tấn công Eve:
   ```bash
@@ -173,7 +214,7 @@ Trước khi chạy bất kỳ kịch bản nào, hãy mở 4 Terminal độc l�
   ```
 - **Bước 4**: Khôi phục lại cấu hình SPF về localhost:
   ```bash
-  python -c "import sqlite3; conn=sqlite3.connect('data/policy/policy.db'); conn.execute('UPDATE spf SET ip=\'127.0.0.1\' WHERE domain=\'mail.local\''); conn.commit()"
+  python -c "from securemail.db_conn import get_conn; conn=get_conn(); cursor=conn.cursor(); cursor.execute(\"UPDATE policy.spf SET ip='127.0.0.1' WHERE domain='mail.local'\"); conn.close()"
   ```
 - **Bước 5**: Đăng nhập Bob để kiểm tra thư:
   ```bash

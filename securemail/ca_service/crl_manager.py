@@ -17,7 +17,8 @@ def build_crl() -> bytes:
     )
     for item in ca_core.list_revoked():
         serial = int(item["serial"], 16)
-        revoked_at = dt.datetime.fromisoformat(item["revoked_at"])
+        raw = item["revoked_at"]
+        revoked_at = raw if isinstance(raw, dt.datetime) else dt.datetime.fromisoformat(raw)
         entry = (
             x509.RevokedCertificateBuilder()
             .serial_number(serial)

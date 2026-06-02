@@ -324,6 +324,52 @@ def fetch_inbox(ctx: dict, host: str = "127.0.0.1", port: int = 1100) -> list[di
         cli.quit()
 
 
+def fetch_sent_list(ctx: dict, host: str = "127.0.0.1", port: int = 1100) -> list[dict]:
+    """Fetch metadata of all emails sent by the user."""
+    st = get_service_ticket(ctx)
+    cli = pop3_client.Pop3Client(host, port)
+    try:
+        cli.helo_starttls()
+        cli.auth(ctx["email"], st["ticket_v"], st["k_c_v"])
+        msgs = cli.list_sent()
+        out = []
+        for m in msgs:
+            headers = m.get("headers", {})
+            out.append({
+                "id": m["id"],
+                "recipient": m.get("recipient", ""),
+                "to": headers.get("To", m.get("recipient", "")),
+                "subject": headers.get("Subject", ""),
+                "date": headers.get("Date", ""),
+            })
+        return out
+    finally:
+        cli.quit()
+
+
+def fetch_sent_message(ctx: dict, msg_id: int, host: str = "127.0.0.1", port: int = 1100) -> dict | None:
+    """Fetch a specific sent email's details. Note: Body is encrypted for recipient only."""
+    st = get_service_ticket(ctx)
+    cli = pop3_client.Pop3Client(host, port)
+    try:
+        cli.helo_starttls()
+        cli.auth(ctx["email"], st["ticket_v"], st["k_c_v"])
+        msg = cli.retr_sent(msg_id)
+        if not msg:
+            return None
+        headers = msg.get("headers", {})
+        return {
+            "id": msg_id,
+            "recipient": msg.get("recipient", ""),
+            "to": headers.get("To", msg.get("recipient", "")),
+            "subject": headers.get("Subject", ""),
+            "date": headers.get("Date", ""),
+            "body": "[S/MIME ENCRYPTED FOR RECIPIENT - CANNOT BE DECRYPTED BY SENDER]",
+        }
+    finally:
+        cli.quit()
+
+
 # ======================================================================
 # Security classification
 # ======================================================================

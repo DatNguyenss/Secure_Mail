@@ -10,11 +10,11 @@ Endpoints (op field):
 """
 import socket
 import threading
-import sqlite3
 import traceback
 from pathlib import Path
 
 from securemail.network.json_framing import send_json, recv_json, b64, unb64
+from securemail.db_conn import get_conn
 from . import ca_core, crl_manager, ocsp_responder
 
 
@@ -40,14 +40,16 @@ def _handle(conn: socket.socket, addr):
         elif op == "ca.root_cert":
             send_json(conn, {"ok": True, "cert_pem_b64": b64(ca_core.CA_CERT_FILE.read_bytes())})
         elif op == "ca.list_issued":
-            conn2 = sqlite3.connect(ca_core.CA_DB)
-            rows = conn2.execute(
-                "SELECT serial, email, not_before, not_after, status FROM issued"
-            ).fetchall()
-            conn2.close()
+            db = get_conn()
+            cursor = db.cursor()
+            cursor.execute(
+                "SELECT serial, email, not_before, not_after, status FROM ca.issued"
+            )
+            rows = cursor.fetchall()
+            db.close()
             send_json(conn, {"ok": True, "rows": [
-                {"serial": r[0], "email": r[1], "not_before": r[2],
-                 "not_after": r[3], "status": r[4]} for r in rows]})
+                {"serial": r[0], "email": r[1], "not_before": str(r[2]),
+                 "not_after": str(r[3]), "status": r[4]} for r in rows]})
         else:
             send_json(conn, {"ok": False, "error": f"unknown op: {op}"})
     except Exception as e:

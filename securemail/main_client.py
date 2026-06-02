@@ -8,6 +8,8 @@ Chế độ 1 — Stateful CLI (lệnh đơn, lưu phiên vào file):
   python -m securemail.main_client fetch
   python -m securemail.main_client list
   python -m securemail.main_client read <id>
+  python -m securemail.main_client sent
+  python -m securemail.main_client read_sent <id>
   python -m securemail.main_client recover [<email>] [<share1> <share2>]
   python -m securemail.main_client status
 
@@ -185,6 +187,46 @@ def _print_message_detail(m: dict):
 
 
 # ======================================================================
+# Helper: compact sent list
+# ======================================================================
+def _print_sent_list(email: str, msgs: list[dict]):
+    """Display a compact table of sent messages."""
+    print(f"\n{bold('═══ Sent by ' + email + ' ═══')}")
+    print(f"  {len(msgs)} message(s)\n")
+    if not msgs:
+        print(dim("  (no sent messages)"))
+        return
+    # Header
+    print(f"  {bold('ID'):>6}  {bold('Date'):<25}  {bold('To'):<28}  {bold('Subject')}")
+    print(f"  {'─' * 6}  {'─' * 25}  {'─' * 28}  {'─' * 30}")
+    for m in msgs:
+        date_str = m.get("date", "")[:25]
+        rcpt = (m.get("to") or m.get("recipient", "?"))[:28]
+        subj = m.get("subject", "(no subject)")[:40]
+        mid = str(m["id"])
+        print(f"  {mid:>6}  {date_str:<25}  {rcpt:<28}  {subj}")
+    print(f"\n  {dim('Use')} {bold('read_sent <id>')} {dim('to view message details.')}")
+
+
+# ======================================================================
+# Helper: detailed single-message view for sent mails
+# ======================================================================
+def _print_sent_detail(m: dict):
+    """Print the full details of a single sent message."""
+    print(f"\n{bold('══════════════════════════════════════════════════')}")
+    print(f"  {bold('Message ID:')}   {m['id']}")
+    print(f"  {bold('To:')}           {m.get('to') or m.get('recipient', '?')}")
+    print(f"  {bold('Subject:')}      {m.get('subject', '(no subject)')}")
+    print(f"  {bold('Date:')}         {m.get('date', '?')}")
+    print(f"{bold('──────────────────────────────────────────────────')}")
+    print(f"  {bold('Body:')}")
+    print()
+    for line in m.get("body", "").splitlines():
+        print(f"    {line}")
+    print(f"\n{bold('══════════════════════════════════════════════════')}")
+
+
+# ======================================================================
 # Stateful CLI — one-shot commands that read/write session file
 # ======================================================================
 def cli_main():
@@ -260,6 +302,28 @@ def cli_main():
             print(f"Message with id={msg_id} not found.")
         else:
             _print_message_detail(msg)
+
+    # --- sent: list sent messages ---
+    elif cmd_name == "sent":
+        ctx = _load_session_or_exit()
+        msgs = client_core.fetch_sent_list(ctx)
+        _print_sent_list(ctx["email"], msgs)
+
+    # --- read_sent <id>: detail sent message ---
+    elif cmd_name == "read_sent":
+        if len(args) != 1:
+            _usage_error("missing message id", "read_sent <id>")
+        ctx = _load_session_or_exit()
+        try:
+            msg_id = int(args[0])
+        except ValueError:
+            print(f"Error: '{args[0]}' is not a valid message ID (must be integer).")
+            sys.exit(1)
+        msg = client_core.fetch_sent_message(ctx, msg_id)
+        if msg is None:
+            print(f"Sent message with id={msg_id} not found.")
+        else:
+            _print_sent_detail(msg)
 
     # --- recover: key escrow recovery ---
     elif cmd_name == "recover":
@@ -443,6 +507,52 @@ class SecureMailShell(cmd.Cmd):
             print(f"Message with id={msg_id} not found.")
             return
         _print_message_detail(msg)
+
+    # ------------------------------------------------------------------
+    # sent — compact sent listing
+    # ------------------------------------------------------------------
+    def do_sent(self, _line: str):
+        """List sent messages (compact view)."""
+        if self._ctx is None:
+            print("Error: Not logged in. Use 'login <email> <password>' first.")
+            return
+        try:
+            msgs = client_core.fetch_sent_list(self._ctx)
+            # cache for subsequent 'read_sent' without round-trip
+            self._cached_msgs = {m["id"]: m for m in msgs}
+            _print_sent_list(self._ctx["email"], msgs)
+        except Exception as exc:
+            print(f"Fetch sent list failed: {exc}")
+
+    # ------------------------------------------------------------------
+    # read_sent <id> — detailed single-message view for sent mails
+    # ------------------------------------------------------------------
+    def do_read_sent(self, line: str):
+        """Read a specific sent message: read_sent <id>"""
+        if self._ctx is None:
+            print("Error: Not logged in. Use 'login <email> <password>' first.")
+            return
+        parts = line.strip().split()
+        if not parts:
+            print("Usage: read_sent <id>")
+            return
+        try:
+            msg_id = int(parts[0])
+        except ValueError:
+            print(f"Error: '{parts[0]}' is not a valid message ID.")
+            return
+
+        msg = self._cached_msgs.get(msg_id)
+        if msg is None:
+            try:
+                msg = client_core.fetch_sent_message(self._ctx, msg_id)
+            except Exception as exc:
+                print(f"Read sent failed: {exc}")
+                return
+        if msg is None:
+            print(f"Sent message with id={msg_id} not found.")
+            return
+        _print_sent_detail(msg)
 
     # ------------------------------------------------------------------
     # recover [share1 share2]

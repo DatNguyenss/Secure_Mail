@@ -16,6 +16,8 @@ import sys
 import time
 from pathlib import Path
 
+from securemail.db_conn import get_conn
+
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.x509.oid import NameOID
@@ -293,11 +295,10 @@ def scenario_5_spoofed_sender():
     # We simulate SPF-fail via adding a rule for a DIFFERENT IP, then sending from localhost.
     print("  configuring SPF to require sender IP != 127.0.0.1 (simulate alien IP) ...")
     # Remove existing SPF, add a spoof-unfriendly rule
-    import sqlite3
-    conn = sqlite3.connect("data/policy/policy.db")
-    conn.execute("DELETE FROM spf WHERE domain=?", (DOMAIN,))
-    conn.execute("INSERT INTO spf(domain, ip) VALUES (?, ?)", (DOMAIN, "10.9.9.9"))  # fake auth IP
-    conn.commit()
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM policy.spf WHERE domain=%s", (DOMAIN,))
+    cursor.execute("INSERT INTO policy.spf(domain, ip) VALUES (%s, %s)", (DOMAIN, "10.9.9.9"))
     conn.close()
 
     eve = client_core.login(f"eve@{DOMAIN}", "eve-pw")
@@ -324,10 +325,10 @@ def scenario_5_spoofed_sender():
     print(f"  result: ok={r.get('ok')} dmarc={r.get('dmarc_action')} spf={r.get('spf_result')}")
 
     # Restore SPF for normal scenarios
-    conn = sqlite3.connect("data/policy/policy.db")
-    conn.execute("DELETE FROM spf WHERE domain=?", (DOMAIN,))
-    conn.execute("INSERT INTO spf(domain, ip) VALUES (?, ?)", (DOMAIN, "127.0.0.1"))
-    conn.commit()
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM policy.spf WHERE domain=%s", (DOMAIN,))
+    cursor.execute("INSERT INTO policy.spf(domain, ip) VALUES (%s, %s)", (DOMAIN, "127.0.0.1"))
     conn.close()
 
     # With DMARC = quarantine, message is still delivered but flagged
