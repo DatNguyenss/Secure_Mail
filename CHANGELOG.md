@@ -279,7 +279,198 @@ Cơ chế này tích hợp tự động vào quá trình đóng gói S/MIME. Đ�
   python -c "from securemail.crypto.key_derivation import hkdf_derive; import os; master_key = os.urandom(32); print('Master Session Key:', master_key.hex()); print('Sub-key for Message #1:', hkdf_derive(master_key, b'mail#1', 32).hex()); print('Sub-key for Message #2:', hkdf_derive(master_key, b'mail#2', 32).hex()); print('Re-derived Sub-key for Message #1:', hkdf_derive(master_key, b'mail#1', 32).hex())"
   ```
   *Kết quả:* Lệnh in ra hai khóa con khác nhau cho hai message ID khác nhau (`mail#1` vs `mail#2`), và chứng minh tính nhất quán khi dẫn xuất lại cùng một context (`mail#1` tạo ra khóa giống hệt). Điều này đảm bảo tính bảo mật riêng biệt cho từng email.
+---
 
+## [2026-06-02] — Tài liệu hóa quy trình kiểm thử đầy đủ Mail Client CLI
+
+### 🎯 Mục tiêu
+Sau khi hoàn thiện code cho chế độ CLI, bổ sung trực tiếp vào `CHANGELOG.md` phần tài liệu vận hành để người dùng có thể tự kiểm tra toàn bộ các lệnh Mail Client bằng terminal.
+
+### 1. CLI là gì?
+CLI là viết tắt của **Command Line Interface** — giao diện dòng lệnh. Người dùng thao tác bằng lệnh trong PowerShell/CMD/Terminal thay vì bấm nút như GUI.
+
+Trong project SecureMail, Mail Client CLI nằm ở module:
+```powershell
+python -m securemail.main_client
+```
+
+Mail Client hỗ trợ 2 chế độ:
+- **Stateful CLI**: chạy từng lệnh riêng từ terminal. Sau khi `login`, session được lưu tại `data/active_session.json`.
+- **Interactive Shell / REPL**: chạy một shell tương tác bằng `python -m securemail.main_client`; session được giữ trong bộ nhớ cho đến khi `logout` hoặc `exit`.
+
+### 2. Điều kiện trước khi test CLI
+Chạy từ thư mục root của project:
+```powershell
+cd "d:\Hoc_Tap\2025-2026\KI_2\Ma_hoa_ung_dung\do_an\Secure_Mail"
+```
+
+Cần mở các service trong 4 terminal riêng:
+```powershell
+python -m securemail.main_ca serve
+```
+```powershell
+python -m securemail.main_kds
+```
+```powershell
+python -m securemail.main_ticket
+```
+```powershell
+python -m securemail.main_mail_server
+```
+
+Nếu Mail Server báo thiếu key/cert, chạy bootstrap trước rồi mở lại Mail Server:
+```powershell
+python -m securemail.run_demo bootstrap
+```
+
+### 3. Quy trình test đủ 9 lệnh Stateful CLI
+Chạy khối lệnh sau trong terminal thứ 5 sau khi đã mở đủ service:
+```powershell
+$stamp = Get-Date -Format "yyyyMMddHHmmss"
+$testUser = "cli_test_$stamp@mail.local"
+$testPass = "cli-test-pw"
+$subject = "CLI Full Test $stamp"
+
+Write-Host "`n[1] TEST register"
+python -m securemail.main_client register $testUser $testPass "CLI Test User"
+
+Write-Host "`n[2] TEST login"
+python -m securemail.main_client login $testUser $testPass
+
+Write-Host "`n[3] TEST status"
+python -m securemail.main_client status
+
+Write-Host "`n[4] TEST send"
+"Hello Bob, this is a full CLI test: $stamp" | python -m securemail.main_client send bob@mail.local $subject
+
+Write-Host "`nSwitch session to Bob for inbox commands"
+python -m securemail.main_client login bob@mail.local bob-pw
+
+Write-Host "`n[5] TEST list"
+python -m securemail.main_client list
+
+$msgId = @'
+import sqlite3
+c = sqlite3.connect("data/mail/mailstore.db")
+r = c.execute(
+    "SELECT id FROM mailbox WHERE recipient=? ORDER BY id DESC LIMIT 1",
+    ("bob@mail.local",)
+).fetchone()
+c.close()
+print(r[0] if r else "")
+'@ | python -
+
+Write-Host "`nLatest message id = $msgId"
+
+Write-Host "`n[6] TEST read"
+python -m securemail.main_client read $msgId
+
+Write-Host "`n[7] TEST fetch"
+python -m securemail.main_client fetch
+
+Write-Host "`n[8] TEST recover"
+python -m securemail.main_client recover bob@mail.local 1 2
+
+Write-Host "`n[9] TEST logout"
+python -m securemail.main_client logout
+
+Write-Host "`nCheck status after logout"
+python -m securemail.main_client status
+```
+
+### 4. Kết quả mong đợi của 9 lệnh CLI
+| Lệnh | Kết quả đạt |
+|---|---|
+| `register` | Tạo user mới không lỗi, có cert/key/salt và principal Kerberos tương ứng. |
+| `login` | In `Logged in as ... Session saved.` và tạo/cập nhật `data/active_session.json`. |
+| `status` | Hiển thị email đang active và độ dài TGT. |
+| `send` | Gửi mail thành công, output có `ok: True` trong kết quả SMTP. |
+| `list` | Hiển thị bảng inbox gồm `ID`, `Status`, `Date`, `From`, `Subject`. |
+| `read <id>` | Hiển thị chi tiết thư gồm `From`, `To`, `Subject`, `Security`, `Signature`, `SPF`, `DKIM`, `DMARC`, `Body`. |
+| `fetch` | Vẫn dump toàn bộ inbox kiểu legacy, giữ tương thích ngược. |
+| `recover` | Khôi phục private key bằng 2 share Shamir và báo restored key. |
+| `logout` | Xóa session local; chạy `status` sau đó phải báo `No active session.` |
+
+### 5. Quy trình test Interactive Shell / REPL
+Khởi chạy:
+```powershell
+python -m securemail.main_client
+```
+
+Trong prompt `securemail>`, nhập:
+```text
+login alice@mail.local alice-pw
+status
+send bob@mail.local REPL CLI Test
+```
+
+Sau lệnh `send`, nhập nội dung mail rồi Enter thêm một dòng trống để gửi:
+```text
+Hello Bob from REPL
+
+```
+
+Tiếp tục trong REPL:
+```text
+logout
+login bob@mail.local bob-pw
+status
+list
+read <id>
+fetch
+recover bob@mail.local 1 2
+logout
+exit
+```
+
+Thay `<id>` bằng ID có thật trong bảng `list`.
+
+### 6. Kiểm tra lỗi tham số CLI
+Các lệnh sau phải báo lỗi thân thiện, không được hiện traceback Python:
+```powershell
+python -m securemail.main_client register
+python -m securemail.main_client login alice@mail.local
+python -m securemail.main_client send
+python -m securemail.main_client read abc
+python -m securemail.main_client recover unknown@mail.local 1
+```
+
+Kết quả đạt nếu output có dạng `Usage:` hoặc thông báo lỗi rõ ràng.
+
+### 7. Ý nghĩa nhãn bảo mật trong `list`
+| Nhãn | Ý nghĩa |
+|---|---|
+| `SECURE` | Chữ ký hợp lệ, SPF pass, DMARC accept, không có dấu hiệu nghi ngờ. |
+| `WARNING` | Có dấu hiệu cần chú ý như DMARC quarantine, SPF fail, DKIM fail/anomaly, từ khóa cảnh báo, hoặc sender ngoài `@mail.local`. |
+| `DANGEROUS` | Có lỗi giải mã/xác thực, chữ ký S/MIME invalid, DMARC reject, hoặc nội dung chứa từ khóa nguy hiểm. |
+
+### 8. File dữ liệu liên quan khi chạy CLI
+| File | Vai trò |
+|---|---|
+| `data/active_session.json` | Session đăng nhập của Stateful CLI. |
+| `data/mail/mailstore.db` | Database SQLite lưu email. |
+| `data/mail.log` | Log Mail Server. |
+| `data/ticket/ticket.db` | Dữ liệu Ticket Service. |
+| `data/users/*.key.pem` | Private key người dùng. |
+| `data/users/*.cert.pem` | Certificate người dùng. |
+| `data/ca/escrow/*.share*.bin` | Shamir key recovery shares. |
+
+### 9. Lưu ý khi test
+- `register` tạo user thật và ghi dữ liệu vào `data/users`, `data/ca/ca.db`, `data/kds/kds.db`, `data/ticket/ticket.db`.
+- `send` tạo email thật trong `data/mail/mailstore.db`.
+- `recover` có thể ghi đè private key local của user được khôi phục.
+- Nếu muốn test mà không làm thay đổi dữ liệu đã commit, nên backup thư mục `data` trước khi chạy.
+
+Backup nhanh:
+```powershell
+Copy-Item data data_backup_cli_test -Recurse
+```
+
+Khôi phục nhanh:
+```powershell
+Remove-Item data -Recurse -Force
+Copy-Item data_backup_cli_test data -Recurse
+```
 ---
 
 ## [2026-06-01] — Hoàn thiện Stateful CLI theo Command Reference
