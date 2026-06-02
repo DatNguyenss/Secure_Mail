@@ -44,6 +44,203 @@ Phiên làm việc được giữ trực tiếp trong bộ nhớ (In-Memory).
 
 ---
 
+## [2026-06-02] — Hướng dẫn Demo 8 Kịch bản (Scenarios) bằng CLI Thủ công
+
+### 🎯 Mục tiêu
+Hướng dẫn chi tiết từng bước cách chạy demo 8 kịch bản (Scenario) bảo mật bằng dòng lệnh (CLI/REPL) thủ công để người đọc dễ dàng thao tác, kiểm thử hoạt động của hệ thống thay vì chỉ chạy các script tự động.
+
+### 📁 File thay đổi
+- `CHANGELOG.md` — Bổ sung hướng dẫn chạy demo thủ công cho 8 Scenario.
+
+### 🧪 Tập lệnh Demo 8 Scenario thủ công
+
+Dưới đây là các bước chi tiết để chạy thủ công bằng tay từ Terminal/CLI:
+
+#### 📂 Chuẩn bị chung (Khởi chạy các dịch vụ)
+Trước khi chạy bất kỳ kịch bản nào, hãy mở 4 Terminal độc lập và chạy các lệnh sau:
+1. **CA Service**: `python -m securemail.main_ca serve`
+2. **KDS (Key Distribution Center)**: `python -m securemail.main_kds`
+3. **Ticket Service**: `python -m securemail.main_ticket`
+4. **Mail Server**: `python -m securemail.main_mail_server`
+
+*(Nếu hệ thống chưa được khởi tạo, hãy khởi tạo trước bằng cách chạy script bootstrap: `python -m securemail.run_demo bootstrap`)*
+
+---
+
+#### 1️⃣ Scenario 1: Luồng gửi/nhận email mã hóa & ký số thông thường (Normal Flow)
+*Chứng minh tính năng xác thực Kerberos, trao đổi khóa, S/MIME mã hóa + ký số, truyền nhận SMTP/POP3.*
+
+- **Bước 1**: Đăng nhập Alice trên Terminal CLI:
+  ```bash
+  python -m securemail.main_client login alice@mail.local alice-pw
+  ```
+- **Bước 2**: Gửi thư mã hóa bảo mật từ Alice tới Bob:
+  ```bash
+  python -m securemail.main_client send bob@mail.local "Hello Bob"
+  ```
+  Nhập nội dung thư (ví dụ: `Xin chao Bob, day la email bao mat.`), sau đó nhấn `Ctrl-D` (hoặc `Ctrl-Z` trên Windows) rồi `Enter` để hoàn tất gửi.
+- **Bước 3**: Đăng xuất Alice và đăng nhập Bob:
+  ```bash
+  python -m securemail.main_client logout
+  python -m securemail.main_client login bob@mail.local bob-pw
+  ```
+- **Bước 4**: Kiểm tra danh sách thư và đọc thư đã giải mã:
+  ```bash
+  python -m securemail.main_client list
+  python -m securemail.main_client read 1
+  ```
+  *Kết quả:* Thư hiển thị chi tiết với nhãn `SECURE` màu xanh lá, trạng thái chữ ký `VALID`, và các kiểm tra SPF, DKIM, DMARC đều thành công.
+
+---
+
+#### 2️⃣ Scenario 2: Tấn công MITM / Thay thế khóa công khai (Public-key Substitution)
+*Chứng minh client sẽ từ chối gửi thư nếu chứng chỉ đích không có chữ ký hợp lệ từ CA.*
+
+- **Bước 1**: Kẻ tấn công tự tạo khóa và chứng chỉ giả mạo (Self-Signed) mạo danh Bob rồi đẩy lên KDS. Do KDS không có CLI trực tiếp cho việc này, ta chạy script python nhỏ để giả lập đẩy cert giả vào KDS:
+  ```bash
+  python -c "from securemail.crypto import rsa_handler; from securemail.kds import kds_client; from cryptography import x509; from cryptography.hazmat.primitives import hashes, serialization; from cryptography.x509.oid import NameOID; import datetime as dt; priv = rsa_handler.generate_keypair(2048); subj = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, 'FAKE Bob'), x509.NameAttribute(NameOID.EMAIL_ADDRESS, 'bob@mail.local')]); now = dt.datetime.now(dt.timezone.utc); fake_cert = x509.CertificateBuilder().subject_name(subj).issuer_name(subj).public_key(priv.public_key()).serial_number(x509.random_serial_number()).not_valid_before(now).not_valid_after(now + dt.timedelta(days=30)).sign(priv, hashes.SHA256()); kds_client.put_cert('eve-fake-bob@mail.local', hex(fake_cert.serial_number), fake_cert.public_bytes(serialization.Encoding.PEM))"
+  ```
+- **Bước 2**: Đăng nhập Alice:
+  ```bash
+  python -m securemail.main_client login alice@mail.local alice-pw
+  ```
+- **Bước 3**: Alice thử gửi thư bảo mật cho địa chỉ có chứng chỉ giả mạo đó:
+  ```bash
+  python -m securemail.main_client send eve-fake-bob@mail.local "Hi Fake Bob"
+  ```
+  *Kết quả:* Hệ thống báo lỗi `RuntimeError: verify_chain failed` và chặn không cho gửi thư đi, do chứng chỉ tự ký của kẻ tấn công không dẫn về CA Root tin cậy.
+
+---
+
+#### 3️⃣ Scenario 3: Tấn công phát lại (Replay Attack)
+*Chứng minh Mail Server phát hiện và từ chối các Authenticator bị bắt trộm và gửi lại.*
+
+- **Bước 1**: Đăng nhập Alice:
+  ```bash
+  python -m securemail.main_client login alice@mail.local alice-pw
+  ```
+- **Bước 2**: Gửi một email thông thường tới Bob để tạo phiên làm việc (hoặc sử dụng REPL để thực hiện gửi liên tục):
+  ```bash
+  python -m securemail.main_client send bob@mail.local "Replay Test"
+  ```
+- **Bước 3**: Chạy script giả lập kẻ tấn công bắt gói tin chứa `Authenticator` và `Ticket` gửi lại Mail Server lần thứ hai liên tiếp:
+  ```bash
+  python -c "exec('import socket, securemail.client_core as c, securemail.ticket_service.authenticator as a, securemail.network.json_framing as j, securemail.network.tls_lite as t\nst = c.get_service_ticket(c.load_session())\nauthn = a.build(st[\'k_c_v\'], \'alice@mail.local\', \'127.0.0.1\')\nfor step in [\'First Use\', \'Replay\']:\n    s = socket.create_connection((\'127.0.0.1\', 2525))\n    j.send_json(s, {\'op\': \'EHLO\', \'domain\': \'mail.local\'})\n    j.recv_json(s)\n    j.send_json(s, {\'op\': \'STARTTLS\'})\n    key, _ = t.client_handshake(s)\n    fr = t.SecureFramer(s, key)\n    fr.send({\'op\': \'AUTH\', \'ticket_v\': st[\'ticket_v\'], \'authenticator\': authn})\n    print(step, fr.recv())\n    s.close()\n')"
+  ```
+  *Kết quả:* Lần đầu xác thực sẽ thành công (`ok=True`), nhưng lần gửi thứ hai (Replay) với cùng Authenticator sẽ bị từ chối với lỗi `replay detected` do trùng khớp nonce trong Replay Cache của Mail Server.
+
+---
+
+#### 4️⃣ Scenario 4: Chứng chỉ bị thu hồi (Certificate Revocation - CRL/OCSP)
+*Chứng minh hệ thống ngăn chặn việc gửi thư đến người dùng có chứng chỉ đã bị thu hồi.*
+
+- **Bước 1**: Thu hồi chứng chỉ hiện tại của Alice ở phía CA bằng cách chạy script API thu hồi:
+  ```bash
+  python -c "from securemail.network.json_framing import request; import sqlite3; conn=sqlite3.connect('data/ca/ca.db'); res=conn.execute('SELECT serial FROM certificates WHERE email=\'alice@mail.local\' ORDER BY id DESC').fetchone(); serial=hex(res[0]); print('Revoking Alice cert:', serial); request('127.0.0.1', 9000, {'op': 'ca.revoke', 'serial_hex': serial})"
+  ```
+- **Bước 2**: Đồng bộ CRL (danh sách chứng chỉ bị thu hồi) lên KDS:
+  ```bash
+  python -c "from securemail.ca_service import crl_manager; from securemail.kds import kds_client; kds_client.sync_crl(crl_manager.build_crl())"
+  ```
+- **Bước 3**: Đăng nhập Bob và cố gắng gửi thư tới Alice:
+  ```bash
+  python -m securemail.main_client login bob@mail.local bob-pw
+  python -m securemail.main_client send alice@mail.local "Test Revoked Cert"
+  ```
+  *Kết quả:* Lệnh gửi sẽ bị chặn ngay lập tức ở phía client với lỗi: `RuntimeError: verify_chain failed: cert revoked (CRL)`.
+- **Bước 4 (Dọn dẹp)**: Khôi phục lại tài khoản/chứng chỉ hợp lệ cho Alice bằng cách đăng ký lại:
+  ```bash
+  python -c "import os; [os.unlink(f) for f in ['data/users/alice_at_mail.local.key.pem', 'data/users/alice_at_mail.local.cert.pem', 'data/users/alice_at_mail.local.salt.bin'] if os.path.exists(f)]"
+  python -m securemail.main_client register alice@mail.local alice-pw Alice
+  ```
+
+---
+
+#### 5️⃣ Scenario 5: Kẻ mạo danh người gửi (Spoofed Sender - SPF + DMARC)
+*Chứng minh Mail Server phát hiện và cảnh báo thư giả mạo tiêu đề From.*
+
+- **Bước 1**: Đổi SPF của domain `mail.local` sang một IP khác (ví dụ: `10.9.9.9`) để giả lập thư gửi đến từ IP ngoài danh sách SPF:
+  ```bash
+  python -c "import sqlite3; conn=sqlite3.connect('data/policy/policy.db'); conn.execute('UPDATE spf SET ip=\'10.9.9.9\' WHERE domain=\'mail.local\''); conn.commit()"
+  ```
+- **Bước 2**: Đăng nhập dưới tư cách kẻ tấn công Eve:
+  ```bash
+  python -m securemail.main_client login eve@mail.local eve-pw
+  ```
+- **Bước 3**: Soạn thư mạo danh Alice bằng cách gửi thư có header `From: alice@mail.local` nhưng xác thực bằng session của `eve@mail.local`:
+  ```bash
+  python -c "from securemail import client_core; from securemail.kds import kds_client; from securemail.mail import smime_handler; from securemail.network import smtp_client; eve=client_core.load_session(); bob_cert=kds_client.get_cert('bob@mail.local'); env=smime_handler.build_envelope(b'Forged message content', [('bob@mail.local', bob_cert)], eve['cert_pem'], eve['privkey']); headers={'From': 'alice@mail.local', 'To': 'bob@mail.local', 'Subject': '[S5] Forged Mail', 'Date': 'now'}; st=client_core.get_service_ticket(eve); r=smtp_client.send_mail('127.0.0.1', 2525, 'mail.local', eve['email'], st['ticket_v'], st['k_c_v'], 'alice@mail.local', 'bob@mail.local', env, headers); print(r)"
+  ```
+- **Bước 4**: Khôi phục lại cấu hình SPF về localhost:
+  ```bash
+  python -c "import sqlite3; conn=sqlite3.connect('data/policy/policy.db'); conn.execute('UPDATE spf SET ip=\'127.0.0.1\' WHERE domain=\'mail.local\''); conn.commit()"
+  ```
+- **Bước 5**: Đăng nhập Bob để kiểm tra thư:
+  ```bash
+  python -m securemail.main_client logout
+  python -m securemail.main_client login bob@mail.local bob-pw
+  python -m securemail.main_client list
+  ```
+  *Kết quả:* Email mạo danh sẽ được hiển thị với trạng thái `WARNING` hoặc `DANGEROUS` (do vi phạm DMARC alignment và SPF fail). Khi xem chi tiết bằng lệnh `read <id>`, người đọc sẽ thấy chi tiết lý do vi phạm DMARC.
+
+---
+
+#### 6️⃣ Scenario 6: Tái sử dụng vé Kerberos (Reusable Ticket)
+*Chứng minh cơ chế hoạt động hiệu quả của Kerberos: Đăng nhập 1 lần, gửi nhiều email bằng cùng một Ticket trong thời hạn hiệu lực.*
+
+- **Bước 1**: Đăng nhập Alice:
+  ```bash
+  python -m securemail.main_client login alice@mail.local alice-pw
+  ```
+- **Bước 2**: Gửi nhiều thư liên tục cho Bob mà không cần đăng nhập lại:
+  ```bash
+  python -m securemail.main_client send bob@mail.local "Mail test 1"
+  # (Nhập nội dung thư 1)
+  python -m securemail.main_client send bob@mail.local "Mail test 2"
+  # (Nhập nội dung thư 2)
+  python -m securemail.main_client send bob@mail.local "Mail test 3"
+  # (Nhập nội dung thư 3)
+  ```
+  *Giải thích:* Client tự động lấy `TGT` đã lưu trong file session, gửi yêu cầu lấy Ticket dịch vụ từ TGS (nếu cần), rồi đính kèm `Ticket_v` cùng một `Authenticator` mới (chứa timestamp hiện tại) cho mỗi lần gửi thư. Mail Server chấp nhận tất cả các thư này vì vé vẫn còn hạn và các Authenticator là duy nhất (không bị trùng lặp thời gian/nonce).
+
+---
+
+#### 7️⃣ Scenario 7: Khôi phục khóa riêng (Key Recovery - Shamir 2-of-3)
+*Chứng minh tính năng ký quỹ khóa riêng (Key Escrow) và khôi phục khi mất khóa bằng cách kết hợp 2 trên 3 mảnh chia sẻ.*
+
+- **Bước 1**: Giả lập Bob làm mất file khóa riêng cục bộ:
+  ```bash
+  python -c "import os; os.unlink('data/users/bob_at_mail.local.key.pem')"
+  ```
+- **Bước 2**: Bob thực hiện khôi phục lại khóa riêng bằng cách chọn mảnh chia sẻ số 1 và 2:
+  ```bash
+  python -m securemail.main_client recover bob@mail.local 1 2
+  ```
+- **Bước 3**: Kiểm tra xem file khóa đã xuất hiện trở lại tại thư mục `data/users/bob_at_mail.local.key.pem` chưa:
+  ```bash
+  python -m securemail.main_client login bob@mail.local bob-pw
+  ```
+  *(Đăng nhập thành công chứng minh khóa riêng đã được khôi phục chính xác).*
+- **Bước 4**: Thử khôi phục bằng cặp mảnh chia sẻ khác (ví dụ mảnh 1 và 3):
+  ```bash
+  python -m securemail.main_client recover bob@mail.local 1 3
+  ```
+  *Kết quả:* Khóa riêng được phục hồi hoàn hảo ở mọi tổ hợp mảnh chia sẻ hợp lệ (ngưỡng k=2).
+
+---
+
+#### 8️⃣ Scenario 8: Khóa phiên phân cấp (Hierarchical Subsession Key)
+*Chứng minh mỗi email được mã hóa bằng một khóa phụ khác nhau (HKDF) dẫn xuất từ khóa phiên chính.*
+
+Cơ chế này tích hợp tự động vào quá trình đóng gói S/MIME. Để chạy thử CLI minh chứng cách thức dẫn xuất khóa con bằng HKDF độc lập:
+- Chạy lệnh:
+  ```bash
+  python -c "from securemail.crypto.key_derivation import hkdf_derive; import os; master_key = os.urandom(32); print('Master Session Key:', master_key.hex()); print('Sub-key for Message #1:', hkdf_derive(master_key, b'mail#1', 32).hex()); print('Sub-key for Message #2:', hkdf_derive(master_key, b'mail#2', 32).hex()); print('Re-derived Sub-key for Message #1:', hkdf_derive(master_key, b'mail#1', 32).hex())"
+  ```
+  *Kết quả:* Lệnh in ra hai khóa con khác nhau cho hai message ID khác nhau (`mail#1` vs `mail#2`), và chứng minh tính nhất quán khi dẫn xuất lại cùng một context (`mail#1` tạo ra khóa giống hệt). Điều này đảm bảo tính bảo mật riêng biệt cho từng email.
+
+---
+
 ## [2026-06-01] — Hoàn thiện Stateful CLI theo Command Reference
 
 ### 🎯 Mục tiêu
