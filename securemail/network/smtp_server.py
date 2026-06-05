@@ -54,7 +54,13 @@ def _ensure_mailbox_folder():
     conn = get_conn()
     cursor = conn.cursor()
     cursor.execute("""
-    IF COL_LENGTH('mail.mailbox', 'folder') IS NULL
+    IF NOT EXISTS (
+        SELECT 1
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = 'mail'
+          AND TABLE_NAME = 'mailbox'
+          AND COLUMN_NAME = 'folder'
+    )
     BEGIN
         ALTER TABLE mail.mailbox
         ADD folder NVARCHAR(20) NOT NULL

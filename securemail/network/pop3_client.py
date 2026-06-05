@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """POP3-lite client."""
 import base64
 import json

@@ -68,6 +68,20 @@ def _create_server_identity(common_name: str, email: str, passphrase: bytes,
     out_cert.write_bytes(cert_pem)
 
 
+def _user_registered(email: str) -> bool:
+    user_key = Path(f"data/users/{email.replace('@','_at_')}.key.pem")
+    if not user_key.exists():
+        return False
+    if not kds_client.get_cert(email):
+        return False
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM ticket.principals WHERE id_c=%s", (email,))
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count > 0
+
+
 def bootstrap():
     _banner("BOOTSTRAP")
 
@@ -102,8 +116,7 @@ def bootstrap():
         (f"admin@{DOMAIN}", "admin-pw", "Admin", "admin"),
     ]:
         # Skip if already registered (idempotent)
-        user_key = Path(f"data/users/{email.replace('@','_at_')}.key.pem")
-        if user_key.exists():
+        if _user_registered(email):
             print(f"  skip {email} (already exists)")
             continue
         client_core.register(email, pw, display, role)
