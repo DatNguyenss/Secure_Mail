@@ -9,7 +9,8 @@ Chế độ 1 — Stateful CLI (lệnh đơn, lưu phiên vào file):
   python -m securemail.main_client list
   python -m securemail.main_client read <id>
   python -m securemail.main_client sent
-  python -m securemail.main_client read_sent <id>
+  python -m securemail.main_client sent-read <id>
+  python -m securemail.main_client read_sent <id>      # alias
   python -m securemail.main_client recover [<email>] [<share1> <share2>]
   python -m securemail.main_client status
 
@@ -152,6 +153,24 @@ def _print_inbox_list(email: str, msgs: list[dict]):
     print(f"\n  {dim('Use')} {bold('read <id>')} {dim('to view message details.')}")
 
 
+def _print_sent_list(email: str, msgs: list[dict]):
+    """Display a compact Sent-folder table."""
+    print(f"\n{bold('═══ Sent mail of ' + email + ' ═══')}")
+    print(f"  {len(msgs)} message(s)\n")
+    if not msgs:
+        print(dim("  (empty sent mail)"))
+        return
+    print(f"  {bold('ID'):>6}  {bold('Date'):<25}  {bold('To'):<32}  {bold('Subject')}")
+    print(f"  {'─' * 6}  {'─' * 25}  {'─' * 32}  {'─' * 30}")
+    for m in msgs:
+        date_str = m.get("date", "")[:25]
+        to_addr = (m.get("to") or m.get("recipient", "?"))[:32]
+        subj = m.get("subject", "(no subject)")[:40]
+        mid = str(m["id"])
+        print(f"  {mid:>6}  {date_str:<25}  {to_addr:<32}  {subj}")
+    print(f"\n  {dim('Use')} {bold('sent-read <id>')} {dim('to view sent message details.')}")
+
+
 # ======================================================================
 # Helper: detailed single-message view
 # ======================================================================
@@ -184,47 +203,6 @@ def _print_message_detail(m: dict):
         for line in m.get("body", "").splitlines():
             print(f"    {line}")
     print(f"\n{bold('══════════════════════════════════════════════════')}")
-
-
-# ======================================================================
-# Helper: compact sent list
-# ======================================================================
-def _print_sent_list(email: str, msgs: list[dict]):
-    """Display a compact table of sent messages."""
-    print(f"\n{bold('═══ Sent by ' + email + ' ═══')}")
-    print(f"  {len(msgs)} message(s)\n")
-    if not msgs:
-        print(dim("  (no sent messages)"))
-        return
-    # Header
-    print(f"  {bold('ID'):>6}  {bold('Date'):<25}  {bold('To'):<28}  {bold('Subject')}")
-    print(f"  {'─' * 6}  {'─' * 25}  {'─' * 28}  {'─' * 30}")
-    for m in msgs:
-        date_str = m.get("date", "")[:25]
-        rcpt = (m.get("to") or m.get("recipient", "?"))[:28]
-        subj = m.get("subject", "(no subject)")[:40]
-        mid = str(m["id"])
-        print(f"  {mid:>6}  {date_str:<25}  {rcpt:<28}  {subj}")
-    print(f"\n  {dim('Use')} {bold('read_sent <id>')} {dim('to view message details.')}")
-
-
-# ======================================================================
-# Helper: detailed single-message view for sent mails
-# ======================================================================
-def _print_sent_detail(m: dict):
-    """Print the full details of a single sent message."""
-    print(f"\n{bold('══════════════════════════════════════════════════')}")
-    print(f"  {bold('Message ID:')}   {m['id']}")
-    print(f"  {bold('To:')}           {m.get('to') or m.get('recipient', '?')}")
-    print(f"  {bold('Subject:')}      {m.get('subject', '(no subject)')}")
-    print(f"  {bold('Date:')}         {m.get('date', '?')}")
-    print(f"{bold('──────────────────────────────────────────────────')}")
-    print(f"  {bold('Body:')}")
-    print()
-    for line in m.get("body", "").splitlines():
-        print(f"    {line}")
-    print(f"\n{bold('══════════════════════════════════════════════════')}")
-
 
 # ======================================================================
 # Stateful CLI — one-shot commands that read/write session file
@@ -271,7 +249,10 @@ def cli_main():
         print("Enter email body (end with Ctrl-Z on Windows / Ctrl-D on Unix):")
         body = sys.stdin.read()
         r = client_core.send_secure_email(ctx, [to_addr], subject, body)
-        print(f"Sent: {r['envelope_len']} bytes envelope")
+        print(
+            f"Sent: {r['envelope_len']} bytes recipient envelope; "
+            f"{r['sender_copy_len']} bytes sender copy"
+        )
         for rcpt, resp in r["results"]:
             print(f"  {rcpt}: {resp}")
 
@@ -303,16 +284,16 @@ def cli_main():
         else:
             _print_message_detail(msg)
 
-    # --- sent: list sent messages ---
+    # --- sent: compact Sent-folder listing ---
     elif cmd_name == "sent":
         ctx = _load_session_or_exit()
-        msgs = client_core.fetch_sent_list(ctx)
+        msgs = client_core.fetch_sent(ctx)
         _print_sent_list(ctx["email"], msgs)
 
-    # --- read_sent <id>: detail sent message ---
-    elif cmd_name == "read_sent":
+    # --- sent-read <id>: detailed Sent-folder view ---
+    elif cmd_name in ("sent-read", "read_sent"):
         if len(args) != 1:
-            _usage_error("missing message id", "read_sent <id>")
+            _usage_error("missing message id", "sent-read <id>")
         ctx = _load_session_or_exit()
         try:
             msg_id = int(args[0])
@@ -323,7 +304,7 @@ def cli_main():
         if msg is None:
             print(f"Sent message with id={msg_id} not found.")
         else:
-            _print_sent_detail(msg)
+            _print_message_detail(msg)
 
     # --- recover: key escrow recovery ---
     elif cmd_name == "recover":
@@ -371,6 +352,7 @@ class SecureMailShell(cmd.Cmd):
         super().__init__()
         self._ctx = None  # in-memory session context
         self._cached_msgs: dict[int, dict] = {}  # cache from last 'list'
+        self._cached_sent_msgs: dict[int, dict] = {}  # cache from last 'sent'
 
     def precmd(self, line: str) -> str:
         """Normalize piped input from shells that prepend a UTF-8 BOM."""
@@ -389,6 +371,7 @@ class SecureMailShell(cmd.Cmd):
         try:
             self._ctx = client_core.login(email, password)
             self._cached_msgs = {}
+            self._cached_sent_msgs = {}
             self.prompt = f"{email}> "
             print(f"Logged in as {email}.")
             print(f"  TGT length={len(self._ctx['tgt'])}")
@@ -406,6 +389,7 @@ class SecureMailShell(cmd.Cmd):
         email = self._ctx["email"]
         self._ctx = None
         self._cached_msgs = {}
+        self._cached_sent_msgs = {}
         self.prompt = "securemail> "
         print(f"Logged out from {email}.")
 
@@ -441,7 +425,10 @@ class SecureMailShell(cmd.Cmd):
             r = client_core.send_secure_email(
                 self._ctx, [to_addr], subject, body
             )
-            print(f"Sent: {r['envelope_len']} bytes envelope")
+            print(
+                f"Sent: {r['envelope_len']} bytes recipient envelope; "
+                f"{r['sender_copy_len']} bytes sender copy"
+            )
             for rcpt, resp in r["results"]:
                 print(f"  {rcpt}: {resp}")
         except Exception as exc:
@@ -509,32 +496,27 @@ class SecureMailShell(cmd.Cmd):
         _print_message_detail(msg)
 
     # ------------------------------------------------------------------
-    # sent — compact sent listing
+    # sent [read <id>] — compact Sent folder / detailed sent message
     # ------------------------------------------------------------------
-    def do_sent(self, _line: str):
-        """List sent messages (compact view)."""
-        if self._ctx is None:
-            print("Error: Not logged in. Use 'login <email> <password>' first.")
-            return
-        try:
-            msgs = client_core.fetch_sent_list(self._ctx)
-            # cache for subsequent 'read_sent' without round-trip
-            self._cached_msgs = {m["id"]: m for m in msgs}
-            _print_sent_list(self._ctx["email"], msgs)
-        except Exception as exc:
-            print(f"Fetch sent list failed: {exc}")
-
-    # ------------------------------------------------------------------
-    # read_sent <id> — detailed single-message view for sent mails
-    # ------------------------------------------------------------------
-    def do_read_sent(self, line: str):
-        """Read a specific sent message: read_sent <id>"""
+    def do_sent(self, line: str):
+        """List/read sent mail: sent OR sent read <id> OR sent <id>"""
         if self._ctx is None:
             print("Error: Not logged in. Use 'login <email> <password>' first.")
             return
         parts = line.strip().split()
         if not parts:
-            print("Usage: read_sent <id>")
+            try:
+                msgs = client_core.fetch_sent(self._ctx)
+                self._cached_sent_msgs = {m["id"]: m for m in msgs}
+                _print_sent_list(self._ctx["email"], msgs)
+            except Exception as exc:
+                print(f"Sent list failed: {exc}")
+            return
+
+        if parts[0] == "read":
+            parts = parts[1:]
+        if len(parts) != 1:
+            print("Usage: sent [read <id>]")
             return
         try:
             msg_id = int(parts[0])
@@ -542,17 +524,21 @@ class SecureMailShell(cmd.Cmd):
             print(f"Error: '{parts[0]}' is not a valid message ID.")
             return
 
-        msg = self._cached_msgs.get(msg_id)
+        msg = self._cached_sent_msgs.get(msg_id)
         if msg is None:
             try:
                 msg = client_core.fetch_sent_message(self._ctx, msg_id)
             except Exception as exc:
-                print(f"Read sent failed: {exc}")
+                print(f"Sent read failed: {exc}")
                 return
         if msg is None:
             print(f"Sent message with id={msg_id} not found.")
             return
-        _print_sent_detail(msg)
+        _print_message_detail(msg)
+
+    def do_read_sent(self, line: str):
+        """Alias for sent read <id>."""
+        return self.do_sent(f"read {line}")
 
     # ------------------------------------------------------------------
     # recover [share1 share2]

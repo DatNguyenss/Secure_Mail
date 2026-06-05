@@ -18,8 +18,9 @@ Chạy trực tiếp từ shell hệ thống, tự động lưu và tải phiên
 | `python -m securemail.main_client send <to> <subject>` | Gửi email bảo mật (nội dung nhập từ stdin, kết thúc bằng `Ctrl-D`/`Ctrl-Z`). |
 | `python -m securemail.main_client list` | **[MỚI]** Liệt kê bảng rút gọn inbox có nhãn bảo mật màu (`SECURE`, `WARNING`, `DANGEROUS`). |
 | `python -m securemail.main_client read <id>` | **[MỚI]** Xem chi tiết nội dung giải mã và chứng thực của một email cụ thể theo ID. |
-| `python -m securemail.main_client sent` | **[MỚI]** Liệt kê bảng rút gọn các email đã gửi ra (Sent Mails). |
-| `python -m securemail.main_client read_sent <id>` | **[MỚI]** Xem metadata của email đã gửi. |
+| `python -m securemail.main_client sent` | **[MỚI]** Liệt kê Thư đã gửi, lấy từ bản copy được mã hóa riêng cho người gửi. |
+| `python -m securemail.main_client sent-read <id>` | **[MỚI]** Giải mã và xem chi tiết một thư trong Sent bằng private key của chính người gửi. |
+| `python -m securemail.main_client read_sent <id>` | Alias tương thích cho `sent-read <id>`. |
 | `python -m securemail.main_client fetch` | Tải và giải mã toàn bộ inbox (giao diện legacy, dump toàn bộ thư). |
 | `python -m securemail.main_client recover [<email>] [<share1> <share2>]` | Khôi phục khóa riêng bằng cơ chế Shamir Secret Sharing (2-of-3). Nếu chưa đăng nhập, bắt buộc truyền vào `<email>`. |
 | `python -m securemail.main_client logout` | Đăng xuất, xóa file session cục bộ. |
@@ -38,13 +39,86 @@ Phiên làm việc được giữ trực tiếp trong bộ nhớ (In-Memory).
 | `send <to> [<subject>]` | Gửi email bảo mật (gõ các dòng nội dung, ấn Enter dòng trống hoặc `Ctrl-D` để gửi). |
 | `list` | **[MỚI]** Tải inbox và hiển thị danh sách thư rút gọn kèm nhãn bảo mật. Đồng thời cache kết quả. |
 | `read <id>` | **[MỚI]** Xem chi tiết email cụ thể theo ID (đọc nhanh từ cache nếu đã chạy `list`, hoặc fetch POP3). |
-| `sent` | **[MỚI]** Hiển thị danh sách các email đã gửi ra. Đồng thời cache kết quả. |
-| `read_sent <id>` | **[MỚI]** Xem metadata email đã gửi cụ thể theo ID (từ cache hoặc qua POP3). |
+| `sent` | **[MỚI]** Liệt kê Thư đã gửi đã mã hóa riêng cho chính người gửi. |
+| `sent read <id>` / `sent <id>` | **[MỚI]** Giải mã và xem chi tiết một thư đã gửi. |
+| `read_sent <id>` | Alias tương thích cho `sent read <id>`. |
 | `fetch` | Tải và giải mã hiển thị toàn bộ inbox (legacy view). |
 | `recover [<email>] [<share1> <share2>]` | Khôi phục khóa riêng bằng Shamir từ REPL. Nếu chưa đăng nhập, bắt buộc truyền vào `<email>`. |
 | `logout` | Đăng xuất người dùng hiện tại, prompt quay lại thành `securemail> `. |
 | `help` / `help <lệnh>` | Hiển thị trợ giúp của REPL hoặc chi tiết cách dùng một lệnh. |
 | `exit` / `quit` | Thoát chế độ Interactive Shell (REPL). |
+
+---
+
+## [2026-06-05] — Dual Encryption cho Thư đã gửi (Sent Mail)
+
+### 🎯 Mục tiêu
+Khắc phục vấn đề cũ: email gửi đi chỉ được mã hóa bằng public key của người nhận, nên người gửi không thể giải mã và xem lại nội dung trong mục Thư đã gửi.
+
+Mục tiêu của bản cập nhật này là cho phép người gửi xem lại mail đã gửi, nhưng server vẫn chỉ lưu dữ liệu đã mã hóa, không lưu plaintext.
+
+### 1. Giải pháp áp dụng: Mã hóa đôi (Dual Encryption)
+Khi người dùng nhấn gửi, client tạo **2 bản mã hóa riêng biệt** từ cùng một nội dung email:
+
+- **Bản gửi đi cho người nhận**: nội dung được đóng gói thành S/MIME-lite envelope, trong đó CEK được mã hóa bằng public key của người nhận.
+- **Bản lưu vào Thư đã gửi**: client tạo thêm một S/MIME-lite envelope khác, trong đó CEK được mã hóa bằng public key của chính người gửi.
+
+Vì vậy, người nhận chỉ giải mã được bản dành cho người nhận bằng private key của họ. Người gửi chỉ giải mã được bản Sent copy bằng private key của chính mình.
+
+### 2. Luồng xử lý mới
+Quy trình gửi mail sau khi cập nhật:
+
+1. Client lấy nội dung email gốc.
+2. Client ký nội dung bằng private key của người gửi.
+3. Client tạo envelope gửi đi cho recipient.
+4. Client tạo envelope thứ hai cho sender copy.
+5. SMTP server lưu envelope gửi đi vào `folder='inbox'` của người nhận.
+6. SMTP server lưu sender copy vào `folder='sent'` của người gửi.
+7. Khi người gửi mở Thư đã gửi, POP3-lite trả về bản Sent copy và client giải mã bằng private key của người gửi.
+
+### 3. Thay đổi trong code
+- `securemail/client_core.py`
+  - Thêm `sender_copy_envelope`.
+  - Thêm `fetch_sent(...)` để lấy danh sách Thư đã gửi.
+  - Thêm `fetch_sent_message(...)` để đọc chi tiết một thư đã gửi.
+- `securemail/network/smtp_client.py`
+  - Cho phép gửi thêm trường `sender_copy_envelope_b64` trong DATA.
+- `securemail/network/smtp_server.py`
+  - Thêm cột `folder` cho bảng `mail.mailbox`.
+  - Tự động migrate database cũ, gán thư cũ vào `folder='inbox'`.
+  - Lưu bản mail nhận vào inbox và bản copy của người gửi vào sent.
+  - Kiểm tra sender copy thật sự có email người gửi trong danh sách recipients trước khi lưu.
+- `securemail/network/pop3_client.py`
+  - Hỗ trợ `list(folder='sent')` và `retr(id, folder='sent')`.
+- `securemail/network/pop3_server.py`
+  - Hỗ trợ truy vấn thư theo folder: `inbox` hoặc `sent`.
+- `securemail/main_client.py`
+  - Thêm lệnh Stateful CLI: `sent`, `sent-read <id>`.
+  - Thêm lệnh REPL: `sent`, `sent read <id>` hoặc `sent <id>`.
+- `securemail/README.md`
+  - Bổ sung hướng dẫn sử dụng lệnh xem Thư đã gửi.
+
+### 4. Lệnh sử dụng mới
+Stateful CLI:
+```powershell
+python -m securemail.main_client sent
+python -m securemail.main_client sent-read <id>
+```
+
+Interactive Shell / REPL:
+```text
+sent
+sent read <id>
+sent <id>
+```
+
+### 5. Ý nghĩa bảo mật
+Server vẫn không có khả năng đọc nội dung email vì cả inbox envelope và sent envelope đều là dữ liệu đã mã hóa.
+
+Nếu server hoặc database bị lộ, attacker chỉ lấy được ciphertext. Muốn đọc bản inbox cần private key của người nhận; muốn đọc bản sent cần private key của người gửi.
+
+### 6. Giới hạn
+Các thư đã gửi trước bản cập nhật này không có sender copy, nên người gửi vẫn không thể xem lại nội dung các thư cũ đó. Tính năng Sent Mail chỉ áp dụng đầy đủ cho các thư được gửi sau khi cập nhật và restart Mail Server.
 
 ---
 

@@ -22,6 +22,7 @@ def send_mail(
     headers: dict,
     dkim_sig: str | None = None,
     use_starttls: bool = True,
+    sender_copy_envelope: bytes | None = None,
 ) -> dict:
     with socket.create_connection((host, port), timeout=20) as sock:
         # EHLO
@@ -73,6 +74,8 @@ def send_mail(
         }
         if dkim_sig:
             msg["dkim_sig"] = dkim_sig
+        if sender_copy_envelope is not None:
+            msg["sender_copy_envelope_b64"] = b64(sender_copy_envelope)
         s(msg)
         data_resp = r()
 

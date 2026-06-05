@@ -22,7 +22,7 @@ from pathlib import Path
 
 from securemail.network.json_framing import send_json, recv_json, b64, unb64
 from securemail.network import tls_lite
-from securemail.network.smtp_server import log_event
+from securemail.network.smtp_server import log_event, _ensure_mailbox_folder
 from securemail.crypto.aes_handler import aes_gcm_encrypt
 from securemail.ticket_service import ticket as ticket_mod
 from securemail.ticket_service import authenticator as auth_mod
@@ -109,13 +109,24 @@ def _handle(conn: socket.socket, addr):
                     if auth_ctx:
                         log_event("POP3_FORBIDDEN", f"user={auth_ctx['id_c']} action=pop3.fetch")
                     continue
+                folder = msg.get("folder", "inbox")
+                if folder not in ("inbox", "sent"):
+                    s({"ok": False, "error": "bad folder"})
+                    continue
                 db = get_conn()
                 cursor = db.cursor()
-                cursor.execute(
-                    "SELECT id, sender, received_at, dmarc_action, spf_result, dkim_result "
-                    "FROM mail.mailbox WHERE recipient=%s AND fetched=0 ORDER BY id",
-                    (auth_ctx["id_c"],),
-                )
+                if folder == "inbox":
+                    cursor.execute(
+                        "SELECT id, sender, received_at, dmarc_action, spf_result, dkim_result "
+                        "FROM mail.mailbox WHERE recipient=%s AND folder=%s AND fetched=0 ORDER BY id",
+                        (auth_ctx["id_c"], folder),
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT id, sender, received_at, dmarc_action, spf_result, dkim_result "
+                        "FROM mail.mailbox WHERE recipient=%s AND folder=%s ORDER BY id",
+                        (auth_ctx["id_c"], folder),
+                    )
                 rows = cursor.fetchall()
                 db.close()
                 s({"ok": True, "messages": [
@@ -127,19 +138,23 @@ def _handle(conn: socket.socket, addr):
                 if not auth_ctx:
                     s({"ok": False, "error": "auth"})
                     continue
+                folder = msg.get("folder", "inbox")
+                if folder not in ("inbox", "sent"):
+                    s({"ok": False, "error": "bad folder"})
+                    continue
                 db = get_conn()
                 cursor = db.cursor()
                 cursor.execute(
                     "SELECT sender, envelope, headers_json, dmarc_action, spf_result, dkim_result "
-                    "FROM mail.mailbox WHERE id=%s AND recipient=%s",
-                    (msg["id"], auth_ctx["id_c"]),
+                    "FROM mail.mailbox WHERE id=%s AND recipient=%s AND folder=%s",
+                    (msg["id"], auth_ctx["id_c"], folder),
                 )
                 row = cursor.fetchone()
                 db.close()
                 if not row:
                     s({"ok": False, "error": "not found"})
                     continue
-                log_event("POP3_RETR", f"user={auth_ctx['id_c']} msg_id={msg['id']}")
+                log_event("POP3_RETR", f"user={auth_ctx['id_c']} msg_id={msg['id']} folder={folder}")
                 s({"ok": True, "sender": row[0], "envelope_b64": b64(bytes(row[1])),
                    "headers": json.loads(row[2]),
                    "dmarc_action": row[3], "spf_result": row[4], "dkim_result": row[5]})
@@ -164,7 +179,7 @@ def _handle(conn: socket.socket, addr):
                 cursor = db.cursor()
                 cursor.execute(
                     "SELECT id, recipient, received_at, headers_json "
-                    "FROM mail.mailbox WHERE sender=%s ORDER BY id DESC",
+                    "FROM mail.mailbox WHERE recipient=%s AND folder='sent' ORDER BY id DESC",
                     (auth_ctx["id_c"],),
                 )
                 rows = cursor.fetchall()
@@ -182,7 +197,7 @@ def _handle(conn: socket.socket, addr):
                 cursor = db.cursor()
                 cursor.execute(
                     "SELECT recipient, headers_json "
-                    "FROM mail.mailbox WHERE id=%s AND sender=%s",
+                    "FROM mail.mailbox WHERE id=%s AND recipient=%s AND folder='sent'",
                     (msg["id"], auth_ctx["id_c"]),
                 )
                 row = cursor.fetchone()
@@ -205,6 +220,7 @@ def _handle(conn: socket.socket, addr):
 
 
 def serve():
+    _ensure_mailbox_folder()
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((POP_HOST, POP_PORT))

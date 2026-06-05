@@ -54,6 +54,10 @@ echo "Hello Bob" | python -m securemail.main_client send bob@mail.local "Test su
 python -m securemail.main_client list
 python -m securemail.main_client read 1
 
+# Xem thư đã gửi được mã hóa riêng cho chính người gửi
+python -m securemail.main_client sent
+python -m securemail.main_client sent-read 2
+
 # Lấy inbox kiểu legacy: dump toàn bộ nội dung
 python -m securemail.main_client fetch
 
@@ -146,6 +150,7 @@ Xem chi tiết trong `../Email.md` §10.
 ## Thiết kế an toàn & giới hạn
 
 **Đã làm đúng:**
+- Dual encryption cho Sent Mail: client tạo một envelope cho người nhận và một envelope riêng mã hóa bằng public key của người gửi; server chỉ lưu dữ liệu đã mã hóa.
 - RSA-OAEP (không phải PKCS#1 v1.5) cho key transport → không bị Bleichenbacher
 - RSA-PSS (không phải PKCS#1 v1.5) cho chữ ký → provably secure
 - AES-GCM cho ticket, STARTTLS, subsession → AEAD chống padding oracle

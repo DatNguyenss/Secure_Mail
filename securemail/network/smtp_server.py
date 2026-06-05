@@ -43,6 +43,39 @@ DOMAIN = "mail.local"
 SRV_REPLAY = auth_mod.ReplayCache(window_seconds=300)
 
 
+_MAILBOX_FOLDER_READY = False
+
+
+def _ensure_mailbox_folder():
+    """Add the Sent/Inbox folder column for existing SQL Server mailstores."""
+    global _MAILBOX_FOLDER_READY
+    if _MAILBOX_FOLDER_READY:
+        return
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("""
+    IF COL_LENGTH('mail.mailbox', 'folder') IS NULL
+    BEGIN
+        ALTER TABLE mail.mailbox
+        ADD folder NVARCHAR(20) NOT NULL
+            CONSTRAINT DF_mailbox_folder DEFAULT 'inbox'
+    END
+    """)
+    cursor.execute("""
+    IF NOT EXISTS (
+        SELECT 1 FROM sys.indexes
+        WHERE name = 'idx_mailbox_recipient_folder'
+          AND object_id = OBJECT_ID('mail.mailbox')
+    )
+    BEGIN
+        CREATE INDEX idx_mailbox_recipient_folder
+        ON mail.mailbox(recipient, folder, fetched)
+    END
+    """)
+    conn.close()
+    _MAILBOX_FOLDER_READY = True
+
+
 def log_event(event: str, details: str = ""):
     conn = get_conn()
     cursor = conn.cursor()
@@ -54,21 +87,32 @@ def log_event(event: str, details: str = ""):
 
 
 def store_mail(recipient: str, sender: str, envelope: bytes, headers: dict,
-               dmarc_action: str, spf_result: str, dkim_result: str) -> int:
+               dmarc_action: str, spf_result: str, dkim_result: str,
+               folder: str = "inbox") -> int:
+    _ensure_mailbox_folder()
     conn = get_conn()
     cursor = conn.cursor()
     cursor.execute(
         "INSERT INTO mail.mailbox(recipient, sender, received_at, envelope, headers_json, "
-        "dmarc_action, spf_result, dkim_result, fetched) "
+        "dmarc_action, spf_result, dkim_result, folder, fetched) "
         "OUTPUT INSERTED.id "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 0)",
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 0)",
         (recipient, sender, dt.datetime.now(dt.timezone.utc),
-         bytearray(envelope), json.dumps(headers), dmarc_action, spf_result, dkim_result),
+         bytearray(envelope), json.dumps(headers), dmarc_action, spf_result,
+         dkim_result, folder),
     )
     row = cursor.fetchone()
     mid = row[0]
     conn.close()
     return mid
+
+
+def _envelope_has_recipient(envelope: bytes, email: str) -> bool:
+    try:
+        env = json.loads(envelope.decode("utf-8"))
+    except Exception:
+        return False
+    return any(r.get("email") == email for r in env.get("recipients", []))
 
 
 def _handle_client(conn: socket.socket, addr):
@@ -216,9 +260,22 @@ def _handle_client(conn: socket.socket, addr):
 
                 # Store
                 mid = store_mail(state["to"], state["from"], envelope, headers,
-                                 action, spf_result, dkim_result)
+                                 action, spf_result, dkim_result, folder="inbox")
+                sent_mid = None
+                sender_copy_b64 = msg.get("sender_copy_envelope_b64")
+                if sender_copy_b64:
+                    sender_copy = unb64(sender_copy_b64)
+                    if _envelope_has_recipient(sender_copy, state["from"]):
+                        sent_mid = store_mail(
+                            state["from"], state["from"], sender_copy, headers,
+                            action, spf_result, dkim_result, folder="sent"
+                        )
+                        log_event("SENT_COPY", f"id={sent_mid} sender={state['from']} rcpt={state['to']}")
+                    else:
+                        log_event("SENT_COPY_REJECTED", f"sender={state['from']} reason=not_recipient")
                 log_event("DELIVER", f"id={mid} {state['from']}→{state['to']} dmarc={action}")
                 send({"ok": True, "accepted": True, "message_id": f"<{mid}@{DOMAIN}>",
+                      "sent_copy_id": sent_mid,
                       "spf_result": spf_result, "dkim_result": dkim_result,
                       "dmarc_action": action, "mta_dkim": mta_dkim})
                 state["from"] = None
@@ -243,6 +300,7 @@ def _load_server_privkey():
 
 
 def serve():
+    _ensure_mailbox_folder()
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((SMTP_HOST, SMTP_PORT))

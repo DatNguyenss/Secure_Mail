@@ -44,13 +44,13 @@ class Pop3Client:
         nonce, ct = blob[:12], blob[12:]
         aes_gcm_decrypt(k_c_v, nonce, ct, aad=b"mutual-v1")
 
-    def list(self) -> list[dict]:
-        self._s({"op": "LIST"})
+    def list(self, folder: str = "inbox") -> list[dict]:
+        self._s({"op": "LIST", "folder": folder})
         r = self._r()
         return r.get("messages", [])
 
-    def retr(self, mid: int) -> dict | None:
-        self._s({"op": "RETR", "id": mid})
+    def retr(self, mid: int, folder: str = "inbox") -> dict | None:
+        self._s({"op": "RETR", "id": mid, "folder": folder})
         r = self._r()
         if not r.get("ok"):
             return None

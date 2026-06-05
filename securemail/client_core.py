@@ -236,6 +236,9 @@ def send_secure_email(
     envelope = smime_handler.build_envelope(
         body_bytes, recipients, ctx["cert_pem"], ctx["privkey"]
     )
+    sender_copy_envelope = smime_handler.build_envelope(
+        body_bytes, [(ctx["email"], ctx["cert_pem"])], ctx["cert_pem"], ctx["privkey"]
+    )
 
     # 5. Get Service Ticket for mail
     st = get_service_ticket(ctx)
@@ -262,21 +265,27 @@ def send_secure_email(
 
     # 8. Send per recipient
     results = []
-    for rcpt in recipient_emails:
+    for index, rcpt in enumerate(recipient_emails):
         r = smtp_client.send_mail(
             smtp_host, smtp_port, domain,
             ctx["email"], st["ticket_v"], st["k_c_v"],
             ctx["email"], rcpt, envelope, headers, dkim_value,
+            sender_copy_envelope=sender_copy_envelope if index == 0 else None,
         )
         results.append((rcpt, r))
-    return {"envelope_len": len(envelope), "results": results}
+    return {
+        "envelope_len": len(envelope),
+        "sender_copy_len": len(sender_copy_envelope),
+        "results": results,
+    }
 
 
-def _decode_pop3_message(ctx: dict, msg_id: int, full: dict) -> dict:
+def _decode_pop3_message(ctx: dict, msg_id: int, full: dict, folder: str = "inbox") -> dict:
     """Convert a POP3 RETR response into the public inbox message shape."""
     headers = full.get("headers", {})
     base = {
         "id": msg_id,
+        "folder": folder,
         "sender": full.get("sender", ""),
         "recipient": ctx["email"],
         "to": headers.get("To", ctx["email"]),
@@ -318,56 +327,35 @@ def fetch_inbox(ctx: dict, host: str = "127.0.0.1", port: int = 1100) -> list[di
             full = cli.retr(m["id"])
             if not full:
                 continue
-            out.append(_decode_pop3_message(ctx, m["id"], full))
+            out.append(_decode_pop3_message(ctx, m["id"], full, folder="inbox"))
+        return out
+    finally:
+        cli.quit()
+
+
+def fetch_sent(ctx: dict, host: str = "127.0.0.1", port: int = 1100) -> list[dict]:
+    """Fetch + decrypt messages stored in the sender's Sent folder."""
+    st = get_service_ticket(ctx)
+    cli = pop3_client.Pop3Client(host, port)
+    try:
+        cli.helo_starttls()
+        cli.auth(ctx["email"], st["ticket_v"], st["k_c_v"])
+        msgs = cli.list(folder="sent")
+
+        out = []
+        for m in msgs:
+            full = cli.retr(m["id"], folder="sent")
+            if not full:
+                continue
+            out.append(_decode_pop3_message(ctx, m["id"], full, folder="sent"))
         return out
     finally:
         cli.quit()
 
 
 def fetch_sent_list(ctx: dict, host: str = "127.0.0.1", port: int = 1100) -> list[dict]:
-    """Fetch metadata of all emails sent by the user."""
-    st = get_service_ticket(ctx)
-    cli = pop3_client.Pop3Client(host, port)
-    try:
-        cli.helo_starttls()
-        cli.auth(ctx["email"], st["ticket_v"], st["k_c_v"])
-        msgs = cli.list_sent()
-        out = []
-        for m in msgs:
-            headers = m.get("headers", {})
-            out.append({
-                "id": m["id"],
-                "recipient": m.get("recipient", ""),
-                "to": headers.get("To", m.get("recipient", "")),
-                "subject": headers.get("Subject", ""),
-                "date": headers.get("Date", ""),
-            })
-        return out
-    finally:
-        cli.quit()
-
-
-def fetch_sent_message(ctx: dict, msg_id: int, host: str = "127.0.0.1", port: int = 1100) -> dict | None:
-    """Fetch a specific sent email's details. Note: Body is encrypted for recipient only."""
-    st = get_service_ticket(ctx)
-    cli = pop3_client.Pop3Client(host, port)
-    try:
-        cli.helo_starttls()
-        cli.auth(ctx["email"], st["ticket_v"], st["k_c_v"])
-        msg = cli.retr_sent(msg_id)
-        if not msg:
-            return None
-        headers = msg.get("headers", {})
-        return {
-            "id": msg_id,
-            "recipient": msg.get("recipient", ""),
-            "to": headers.get("To", msg.get("recipient", "")),
-            "subject": headers.get("Subject", ""),
-            "date": headers.get("Date", ""),
-            "body": "[S/MIME ENCRYPTED FOR RECIPIENT - CANNOT BE DECRYPTED BY SENDER]",
-        }
-    finally:
-        cli.quit()
+    """Backward-compatible alias for older CLI code."""
+    return fetch_sent(ctx, host, port)
 
 
 # ======================================================================
@@ -476,6 +464,25 @@ def fetch_message(
         full = cli.retr(msg_id)
         if not full:
             return None
-        return _decode_pop3_message(ctx, msg_id, full)
+        return _decode_pop3_message(ctx, msg_id, full, folder="inbox")
+    finally:
+        cli.quit()
+
+
+def fetch_sent_message(
+    ctx: dict, msg_id: int,
+    host: str = "127.0.0.1", port: int = 1100,
+) -> dict | None:
+    """Retrieve and decrypt a single message from the Sent folder."""
+    st = get_service_ticket(ctx)
+    cli = pop3_client.Pop3Client(host, port)
+    try:
+        cli.helo_starttls()
+        cli.auth(ctx["email"], st["ticket_v"], st["k_c_v"])
+
+        full = cli.retr(msg_id, folder="sent")
+        if not full:
+            return None
+        return _decode_pop3_message(ctx, msg_id, full, folder="sent")
     finally:
         cli.quit()
