@@ -15,6 +15,7 @@ Triển khai:
 ## Cài đặt
 
 ```bash
+# Chạy từ thư mục project root Secure_Mail
 pip install -r requirements.txt
 ```
 
@@ -70,6 +71,22 @@ python -m securemail.main_client logout
 # REPL tương tác
 python -m securemail.main_client
 ```
+
+### Desktop GUI Tkinter
+
+```bash
+# Chạy từ thư mục project root Secure_Mail
+python -m securemail.gui.app
+# hoặc
+python -m securemail.main_client gui
+```
+
+GUI gom 3 vùng đúng luồng demo:
+- User App: login/register, compose, inbox, sent, security badge, mail detail.
+- Monitoring Dashboard: trạng thái CA/KDS/Ticket/SMTP/POP3, metrics, audit log, alerts.
+- Scenario Lab: bootstrap, chạy từng scenario hoặc toàn bộ 8 scenario và xem console evidence.
+
+Trước khi dùng đầy đủ chức năng, mở các service như bảng "Chạy" ở trên. Nếu service hoặc SQL Server chưa bật, GUI vẫn mở được và sẽ hiển thị lỗi thân thiện ở panel bên phải.
 
 ### CLI CA admin
 

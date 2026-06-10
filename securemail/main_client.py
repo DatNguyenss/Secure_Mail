@@ -13,6 +13,7 @@ Chế độ 1 — Stateful CLI (lệnh đơn, lưu phiên vào file):
   python -m securemail.main_client read_sent <id>      # alias
   python -m securemail.main_client recover [<email>] [<share1> <share2>]
   python -m securemail.main_client status
+  python -m securemail.main_client gui
 
 Chế độ 2 — Interactive Shell (REPL, phiên trong bộ nhớ):
   python -m securemail.main_client              # khởi chạy shell tương tác
@@ -214,6 +215,11 @@ def cli_main():
 
     if cmd_name in ("help", "-h", "--help"):
         _print_usage()
+        return
+
+    if cmd_name == "gui":
+        from securemail.gui.app import main as gui_main
+        gui_main()
         return
 
     # --- register (unchanged, no session needed) ---
