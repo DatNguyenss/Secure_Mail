@@ -129,7 +129,6 @@ class SecureMailApp(tk.Tk):
         self._configure_styles()
         self._build_shell()
         self._load_saved_session()
-        self.show_login()
         self.refresh_services()
         self.after(150, self._drain_task_queue)
 
@@ -185,10 +184,10 @@ class SecureMailApp(tk.Tk):
         body.grid_columnconfigure(1, weight=1)
         body.grid_rowconfigure(0, weight=1)
 
-        nav = tk.Frame(body, bg=COLORS["surface"], width=205, highlightbackground=COLORS["border"], highlightthickness=1)
-        nav.grid(row=0, column=0, sticky="ns")
-        nav.grid_propagate(False)
-        self._build_nav(nav)
+        self.nav = tk.Frame(body, bg=COLORS["surface"], width=205, highlightbackground=COLORS["border"], highlightthickness=1)
+        self.nav.grid(row=0, column=0, sticky="ns")
+        self.nav.grid_propagate(False)
+        self._build_nav()
 
         self.main = tk.Frame(body, bg=COLORS["bg"])
         self.main.grid(row=0, column=1, sticky="nsew", padx=14, pady=14)
@@ -201,7 +200,20 @@ class SecureMailApp(tk.Tk):
         self.right.grid_propagate(False)
         self.operation_log = self._build_right_panel("Security Flow")
 
-    def _build_nav(self, parent: tk.Frame):
+    def _build_nav(self):
+        parent = self.nav
+        self._nav_buttons.clear()
+        active_service_buttons: list[ttk.Button] = []
+        for btn in self._service_toggle_buttons:
+            try:
+                if btn.winfo_exists() and btn.master is not parent:
+                    active_service_buttons.append(btn)
+            except tk.TclError:
+                pass
+        self._service_toggle_buttons = active_service_buttons
+        for child in parent.winfo_children():
+            child.destroy()
+
         def section(text: str):
             tk.Label(parent, text=text.upper(), bg=COLORS["surface"], fg=COLORS["muted"],
                      font=("Segoe UI Semibold", 8)).pack(anchor="w", padx=18, pady=(18, 6))
@@ -211,24 +223,32 @@ class SecureMailApp(tk.Tk):
             btn.pack(fill="x", padx=12, pady=3)
             self._nav_buttons[key] = btn
 
+        role = self.state_data.role
+
+        if not role:
+            section("Account")
+            nav_button("login", "Login / Register", self.show_login)
+            return
+
         section("User App")
-        nav_button("login", "Login / Register", self.show_login)
         nav_button("inbox", "Inbox", self.show_inbox)
         nav_button("sent", "Sent", self.show_sent)
         nav_button("compose", "Compose", self.show_compose)
         nav_button("security", "Security / Recovery", self.show_security)
 
-        section("Monitoring")
-        nav_button("monitor", "Dashboard", self.show_monitor)
+        if role == "admin":
+            section("Monitoring")
+            nav_button("monitor", "Dashboard", self.show_monitor)
 
-        section("Scenario Lab")
-        nav_button("scenario", "Scenarios", self.show_scenarios)
+            section("Scenario Lab")
+            nav_button("scenario", "Scenarios", self.show_scenarios)
+
+            ttk.Separator(parent).pack(fill="x", padx=12, pady=18)
+            self._add_service_toggle_button(parent).pack(fill="x", padx=12, pady=3)
+            ttk.Button(parent, text="Refresh services", command=self.refresh_services).pack(fill="x", padx=12, pady=3)
 
         ttk.Separator(parent).pack(fill="x", padx=12, pady=18)
-        self._add_service_toggle_button(parent).pack(fill="x", padx=12, pady=3)
-        ttk.Button(parent, text="Refresh services", command=self.refresh_services).pack(fill="x", padx=12, pady=3)
         ttk.Button(parent, text="Logout", command=self.logout).pack(fill="x", padx=12, pady=3)
-        self._update_nav_access()
 
     def _add_service_toggle_button(self, parent: tk.Widget) -> ttk.Button:
         btn = ttk.Button(parent, text="Start all services", style="Primary.TButton",
@@ -302,20 +322,16 @@ class SecureMailApp(tk.Tk):
         self._set_pill(self.user_pill, label, "info" if self.state_data.email else "gray")
         self._set_pill(self.tgt_pill, "TGT ACTIVE" if self.state_data.ctx else "NO TGT",
                        "success" if self.state_data.ctx else "gray")
-        self._update_nav_access()
+        if hasattr(self, "nav"):
+            self._build_nav()
 
-    def _update_nav_access(self):
-        if not hasattr(self, "_nav_buttons"):
-            return
-        role = self.state_data.role
-        allowed = {"login"}
-        if role:
-            allowed.update({"inbox", "sent", "compose", "security"})
-        if role == "admin":
-            allowed.update({"monitor", "scenario"})
-
-        for key, btn in self._nav_buttons.items():
-            btn.configure(state="normal" if key in allowed else "disabled")
+    def _require_login(self) -> bool:
+        if self.state_data.ctx:
+            return True
+        messagebox.showwarning("SecureMail", "Ban can login truoc.")
+        self._set_header_user()
+        self.show_login()
+        return False
 
     def _require_admin(self) -> bool:
         if self.state_data.role == "admin":
@@ -380,11 +396,17 @@ class SecureMailApp(tk.Tk):
             self.state_data.ctx = ctx
             self._append_log(f"Loaded saved session for {ctx['email']}")
         self._set_header_user()
+        if self.state_data.ctx:
+            self.show_inbox()
+        else:
+            self.show_login()
 
     def logout(self):
         self.state_data.ctx = None
         self.state_data.inbox.clear()
         self.state_data.sent.clear()
+        self.state_data.selected_message = None
+        self.state_data.current_folder = "inbox"
         client_core.clear_session()
         self._set_header_user()
         self._append_log("Logged out and cleared saved session")
@@ -481,9 +503,13 @@ class SecureMailApp(tk.Tk):
     # Mailbox
     # ------------------------------------------------------------------
     def show_inbox(self):
+        if not self._require_login():
+            return
         self._show_mailbox("inbox")
 
     def show_sent(self):
+        if not self._require_login():
+            return
         self._show_mailbox("sent")
 
     def _show_mailbox(self, folder: str):
@@ -656,6 +682,8 @@ class SecureMailApp(tk.Tk):
     # Compose
     # ------------------------------------------------------------------
     def show_compose(self):
+        if not self._require_login():
+            return
         self._clear_main()
         self.operation_log = self._build_right_panel("Send Security Flow")
         self._page_title("Compose", "Gui email ma hoa dau-cuoi va ky so RSA-PSS.")
@@ -753,6 +781,8 @@ class SecureMailApp(tk.Tk):
     # Security / Recovery
     # ------------------------------------------------------------------
     def show_security(self):
+        if not self._require_login():
+            return
         self._clear_main()
         self.operation_log = self._build_right_panel("Identity Security")
         self._page_title("Security / Certificates", "Kiem tra cert/key local va khoi phuc private key bang Shamir shares.")
