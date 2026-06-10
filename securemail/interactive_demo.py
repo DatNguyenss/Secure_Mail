@@ -246,23 +246,14 @@ def interactive_bootstrap():
     step_banner(2, total, "Create DKIM Signing Keys (MTA + Client)")
     info("Action", "Generate 2 DKIM keypairs for domain authentication")
     info("Purpose", "DKIM allows MTA to sign email headers to prevent origin forgery")
-    code_snippet(
-        '_create_server_identity("dkim.mail.local", "_dkim.mail.local", ...)\n'
-        '_create_server_identity("dkim-client.mail.local", "_dkim-client.mail.local", ...)'
-    )
+    code_snippet('_create_server_identity("dkim.mail.local", "_dkim.mail.local", ...)')
     wait()
     _create_server_identity(
         f"dkim.{DOMAIN}", f"_dkim.{DOMAIN}", b"mta-domain-key",
         Path(f"data/server/mta_{DOMAIN}_key.pem"),
         Path(f"data/server/mta_{DOMAIN}_cert.pem"),
     )
-    _create_server_identity(
-        f"dkim-client.{DOMAIN}", f"_dkim-client.{DOMAIN}", b"dkim-key",
-        Path(f"data/server/dkim_{DOMAIN}_key.pem"),
-        Path(f"data/server/dkim_{DOMAIN}_cert.pem"),
-    )
     success("MTA DKIM key created")
-    success("Client DKIM key created")
     step_end()
 
     # -- Step 3: Register Users --

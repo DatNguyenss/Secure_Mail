@@ -106,14 +106,6 @@ def bootstrap():
         Path(f"data/server/mta_{DOMAIN}_key.pem"),
         Path(f"data/server/mta_{DOMAIN}_cert.pem"),
     )
-    # Also: register client-side DKIM key (for scenario where sender signs)
-    print("[boot] creating client DKIM key ...")
-    _create_server_identity(
-        f"dkim-client.{DOMAIN}", f"_dkim-client.{DOMAIN}", b"dkim-key",
-        Path(f"data/server/dkim_{DOMAIN}_key.pem"),
-        Path(f"data/server/dkim_{DOMAIN}_cert.pem"),
-    )
-
     # 3. Register demo users and default admin
     print("[boot] registering users Alice / Bob / Eve / Admin ...")
     for email, pw, display, role in [

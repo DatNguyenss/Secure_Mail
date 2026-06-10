@@ -184,9 +184,28 @@ class SecureMailApp(tk.Tk):
         body.grid_columnconfigure(1, weight=1)
         body.grid_rowconfigure(0, weight=1)
 
-        self.nav = tk.Frame(body, bg=COLORS["surface"], width=205, highlightbackground=COLORS["border"], highlightthickness=1)
-        self.nav.grid(row=0, column=0, sticky="ns")
-        self.nav.grid_propagate(False)
+        self.nav_shell = tk.Frame(
+            body,
+            bg=COLORS["surface"],
+            width=205,
+            highlightbackground=COLORS["border"],
+            highlightthickness=1,
+        )
+        self.nav_shell.grid(row=0, column=0, sticky="ns")
+        self.nav_shell.grid_propagate(False)
+        self.nav_canvas = tk.Canvas(self.nav_shell, bg=COLORS["surface"], highlightthickness=0, borderwidth=0)
+        self.nav_scrollbar = ttk.Scrollbar(self.nav_shell, orient="vertical", command=self.nav_canvas.yview)
+        self.nav_canvas.configure(yscrollcommand=self.nav_scrollbar.set)
+        self.nav_canvas.pack(side="left", fill="both", expand=True)
+        self.nav_scrollbar.pack(side="right", fill="y")
+        self.nav = tk.Frame(self.nav_canvas, bg=COLORS["surface"])
+        self._nav_window = self.nav_canvas.create_window((0, 0), window=self.nav, anchor="nw")
+        self.nav.bind("<Configure>", self._sync_nav_scrollregion)
+        self.nav_canvas.bind("<Configure>", self._sync_nav_width)
+        self.nav_canvas.bind("<Enter>", self._bind_nav_mousewheel)
+        self.nav_canvas.bind("<Leave>", self._unbind_nav_mousewheel)
+        self.nav.bind("<Enter>", self._bind_nav_mousewheel)
+        self.nav.bind("<Leave>", self._unbind_nav_mousewheel)
         self._build_nav()
 
         self.main = tk.Frame(body, bg=COLORS["bg"])
@@ -199,6 +218,21 @@ class SecureMailApp(tk.Tk):
         self.right.grid(row=0, column=2, sticky="ns")
         self.right.grid_propagate(False)
         self.operation_log = self._build_right_panel("Security Flow")
+
+    def _sync_nav_scrollregion(self, _event: tk.Event | None = None):
+        self.nav_canvas.configure(scrollregion=self.nav_canvas.bbox("all"))
+
+    def _sync_nav_width(self, event: tk.Event):
+        self.nav_canvas.itemconfigure(self._nav_window, width=event.width)
+
+    def _bind_nav_mousewheel(self, _event: tk.Event):
+        self.nav_canvas.bind_all("<MouseWheel>", self._on_nav_mousewheel)
+
+    def _unbind_nav_mousewheel(self, _event: tk.Event):
+        self.nav_canvas.unbind_all("<MouseWheel>")
+
+    def _on_nav_mousewheel(self, event: tk.Event):
+        self.nav_canvas.yview_scroll(int(-event.delta / 120), "units")
 
     def _build_nav(self):
         parent = self.nav
@@ -239,6 +273,9 @@ class SecureMailApp(tk.Tk):
         if role == "admin":
             section("Monitoring")
             nav_button("monitor", "Dashboard", self.show_monitor)
+
+            section("Domain Security")
+            nav_button("dkim", "DKIM Domains", self.show_dkim_domains)
 
             section("Scenario Lab")
             nav_button("scenario", "Scenarios", self.show_scenarios)
@@ -701,8 +738,6 @@ class SecureMailApp(tk.Tk):
         to_entry.insert(0, "bob@mail.local")
         subject_entry = self._field(inner, "Subject")
         subject_entry.insert(0, "SecureMail test")
-        dkim_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(inner, text="Client-side DKIM sign if key exists", variable=dkim_var).pack(anchor="w", pady=10)
         tk.Label(inner, text="Body", bg=COLORS["surface"], fg=COLORS["muted"]).pack(anchor="w")
         body = tk.Text(inner, height=16, wrap="word", bg="#F8FAFC", fg=COLORS["text"], padx=10, pady=10,
                        font=("Segoe UI", 10))
@@ -717,7 +752,6 @@ class SecureMailApp(tk.Tk):
                        to_entry.get().strip(),
                        subject_entry.get().strip(),
                        body.get("1.0", "end-1c"),
-                       dkim_var.get(),
                    )).pack(side="left", padx=8)
 
         for step in (
@@ -727,7 +761,7 @@ class SecureMailApp(tk.Tk):
             "4. Sign body bang private key nguoi gui",
             "5. Encrypt body bang CEK, wrap CEK bang RSA-OAEP",
             "6. Lay Service Ticket va SMTP STARTTLS-lite",
-            "7. Server kiem tra SPF/DKIM/DMARC va luu encrypted envelope",
+            "7. Mail Server ky DKIM theo domain, kiem tra SPF/DKIM/DMARC va luu encrypted envelope",
         ):
             self._append_log(step)
 
@@ -751,7 +785,7 @@ class SecureMailApp(tk.Tk):
 
         self._run_task("Preview recipient cert", action, done)
 
-    def _send_mail(self, to_text: str, subject: str, body: str, dkim_sign: bool):
+    def _send_mail(self, to_text: str, subject: str, body: str):
         if not self.state_data.ctx:
             messagebox.showwarning("SecureMail", "Ban can login truoc khi gui mail.")
             return
@@ -766,7 +800,6 @@ class SecureMailApp(tk.Tk):
                 recipients,
                 subject,
                 body,
-                dkim_sign=dkim_sign,
             )
 
         def done(result: dict[str, Any]):
@@ -986,6 +1019,50 @@ class SecureMailApp(tk.Tk):
                 self._service_toggle_buttons.remove(btn)
 
     # ------------------------------------------------------------------
+    # DKIM Domain Management
+    # ------------------------------------------------------------------
+    def show_dkim_domains(self):
+        if not self._require_admin():
+            return
+        self._clear_main()
+        self.operation_log = self._build_right_panel("DKIM Domain Registry")
+        self._page_title("DKIM Domains", "Dang ky domain MTA vao KDS de Mail Server ky va verify DKIM.")
+
+        card = self._surface()
+        card.grid(row=1, column=0, sticky="ew")
+        card.grid_columnconfigure(0, weight=1)
+        inner = tk.Frame(card, bg=COLORS["surface"])
+        inner.grid(row=0, column=0, sticky="ew", padx=18, pady=18)
+        inner.grid_columnconfigure(0, weight=1)
+
+        tk.Label(inner, text="Domain", bg=COLORS["surface"], fg=COLORS["muted"]).grid(row=0, column=0, sticky="w")
+        domain_var = tk.StringVar(value=DOMAIN)
+        ttk.Entry(inner, textvariable=domain_var).grid(row=1, column=0, sticky="ew", ipady=5, pady=(3, 12))
+        ttk.Button(
+            inner,
+            text="Register in KDS",
+            style="Primary.TButton",
+            command=lambda: self._register_dkim_domain(domain_var.get().strip()),
+        ).grid(row=2, column=0, sticky="w")
+
+        info = self._surface()
+        info.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        info_inner = tk.Frame(info, bg=COLORS["surface"])
+        info_inner.pack(fill="x", padx=18, pady=14)
+        for label, value in (
+            ("KDS identity", "_dkim.<domain>"),
+            ("Local MTA key", "data/server/mta_<domain>_key.pem"),
+            ("Private key passphrase", "mta-domain-key"),
+        ):
+            row = tk.Frame(info_inner, bg=COLORS["surface"])
+            row.pack(fill="x", pady=2)
+            tk.Label(row, text=label, width=22, anchor="w", bg=COLORS["surface"], fg=COLORS["muted"]).pack(side="left")
+            tk.Label(row, text=value, anchor="w", bg=COLORS["surface"], fg=COLORS["text"]).pack(side="left", fill="x")
+
+        self._append_log("Nhap domain ma SecureMail kiem soat duoc key MTA.")
+        self._append_log("Register se tao key local, xin CA ky cert va publish _dkim.<domain> vao KDS.")
+
+    # ------------------------------------------------------------------
     # Monitor
     # ------------------------------------------------------------------
     def show_monitor(self):
@@ -1080,6 +1157,31 @@ class SecureMailApp(tk.Tk):
             self._populate_alerts(data["logs"], data["metrics"])
 
         self._run_task("Load monitoring data", action, done)
+
+    def _register_dkim_domain(self, domain: str):
+        if not self._require_admin():
+            return
+        if not domain:
+            messagebox.showwarning("SecureMail", "Nhap domain can dang ky DKIM.")
+            return
+
+        def action():
+            return client_core.register_dkim_domain(domain)
+
+        def done(result: dict[str, Any]):
+            state = "created" if result.get("created") else "already registered"
+            self._append_log(
+                f"DKIM domain {result['domain']} {state}; identity={result['identity']} serial={result['serial']}"
+            )
+            self._append_log(f"MTA key: {result['key_path']}")
+            messagebox.showinfo("SecureMail", f"DKIM domain {result['domain']} {state} in KDS.")
+            try:
+                if hasattr(self, "logs_tree") and self.logs_tree.winfo_exists():
+                    self._refresh_monitor_data()
+            except tk.TclError:
+                pass
+
+        self._run_task("Register DKIM domain", action, done)
 
     def _populate_logs(self, logs: list[dict[str, Any]]):
         if not hasattr(self, "logs_tree"):

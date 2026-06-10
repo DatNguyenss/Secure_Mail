@@ -16,6 +16,7 @@ Protocol (JSON-over-TCP với length framing, KHÔNG dùng ASCII SMTP thật):
 import base64
 import datetime as dt
 import json
+import re
 import socket
 import threading
 import time
@@ -39,11 +40,19 @@ from securemail.db_conn import get_conn
 SMTP_HOST = "127.0.0.1"
 SMTP_PORT = 2525
 DOMAIN = "mail.local"
+DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
 SRV_REPLAY = auth_mod.ReplayCache(window_seconds=300)
 
 
 _MAILBOX_FOLDER_READY = False
+
+
+def _mta_dkim_key_path(domain: str) -> Path | None:
+    normalized = domain.strip().lower()
+    if not DOMAIN_RE.match(normalized):
+        return None
+    return Path(f"data/server/mta_{normalized}_key.pem")
 
 
 def _ensure_mailbox_folder():
@@ -222,8 +231,21 @@ def _handle_client(conn: socket.socket, addr):
                     spf_pass = True  # no SPF record → neutral
                 spf_result = "pass" if spf_pass else "fail"
 
-                # --- DKIM verify nếu có ---
+                # --- DKIM: MTA signs controlled domains, then verifies via KDS ---
                 dkim_sig = msg.get("dkim_sig")
+                mta_dkim = None
+                if not dkim_sig:
+                    try:
+                        mta_priv_path = _mta_dkim_key_path(sender_domain)
+                        if mta_priv_path and mta_priv_path.exists():
+                            from securemail.crypto import rsa_handler as rh
+                            mta_priv = rh.load_private_pem(mta_priv_path.read_bytes(), b"mta-domain-key")
+                            dkim_sig = dkim_signer.sign(headers, envelope, sender_domain, "default", mta_priv)
+                            mta_dkim = dkim_sig
+                            log_event("MTA_DKIM_SIGNED", sender_domain)
+                    except Exception as e:
+                        log_event("MTA_DKIM_ERROR", str(e))
+
                 dkim_pass = True
                 dkim_result = "none"
                 if dkim_sig:
@@ -243,19 +265,6 @@ def _handle_client(conn: socket.socket, addr):
                 # --- DMARC ---
                 policy = dmarc_engine.get_policy(sender_domain)
                 action = dmarc_engine.decide(spf_pass, dkim_pass, policy)
-
-                # --- MTA adds its own DKIM-lite signature (A4) ---
-                mta_dkim = None
-                try:
-                    from securemail.kds import kds_client
-                    mta_priv_path = Path(f"data/server/mta_{DOMAIN}_key.pem")
-                    if mta_priv_path.exists():
-                        from securemail.crypto import rsa_handler as rh
-                        mta_priv = rh.load_private_pem(mta_priv_path.read_bytes(), b"mta-domain-key")
-                        mta_dkim = dkim_signer.sign(headers, envelope, DOMAIN, "default", mta_priv)
-                        log_event("MTA_DKIM_SIGNED", sender_domain)
-                except Exception as e:
-                    log_event("MTA_DKIM_ERROR", str(e))
 
                 if action == "reject":
                     send({"ok": False, "error": "rejected by DMARC",

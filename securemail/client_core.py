@@ -6,6 +6,7 @@ import base64
 import datetime as dt
 import json
 import os
+import re
 from pathlib import Path
 
 from cryptography import x509
@@ -17,7 +18,7 @@ from securemail.crypto import rsa_handler
 from securemail.crypto.hmac_utils import password_hash
 from securemail.crypto.key_derivation import hkdf_derive
 from securemail.kds import kds_client
-from securemail.mail import smime_handler, dkim_signer, mime_lite
+from securemail.mail import smime_handler, mime_lite
 from securemail.network import smtp_client, pop3_client
 from securemail.network.json_framing import request, b64, unb64
 from securemail.ticket_service import ts_client
@@ -25,14 +26,23 @@ from securemail.ticket_service.as_tgs_server import MAIL_SRV_NAME
 
 
 USER_DIR = Path("data/users")
+SERVER_DIR = Path("data/server")
 SESSION_FILE = Path("data/active_session.json")
 SESSION_SCHEMA_VERSION = 2
 RESERVED_PUBLIC_REGISTER_EMAILS = {"admin@mail.local"}
+DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
 
 def _user_path(email: str, suffix: str) -> Path:
     safe = email.replace("@", "_at_")
     return USER_DIR / f"{safe}.{suffix}"
+
+
+def _normalize_domain(domain: str) -> str:
+    normalized = domain.strip().lower().removeprefix("@")
+    if not DOMAIN_RE.match(normalized):
+        raise ValueError("invalid domain name")
+    return normalized
 
 
 # ======================================================================
@@ -188,6 +198,70 @@ def public_register(email: str, password: str, display_name: str = ""):
     return register(normalized, password, display_name, role="user")
 
 
+def register_dkim_domain(domain: str, overwrite: bool = False) -> dict:
+    """Register an MTA-controlled DKIM identity for a domain.
+
+    This is an admin operation for domains controlled by this SecureMail
+    deployment. It creates/stores the MTA private key locally and publishes the
+    CA-signed public certificate to KDS as ``_dkim.<domain>``.
+    """
+    normalized = _normalize_domain(domain)
+    dkim_identity = f"_dkim.{normalized}"
+    key_path = SERVER_DIR / f"mta_{normalized}_key.pem"
+    cert_path = SERVER_DIR / f"mta_{normalized}_cert.pem"
+
+    existing = kds_client.get_cert(dkim_identity)
+    if existing and key_path.exists() and not overwrite:
+        cert = x509.load_pem_x509_certificate(existing)
+        return {
+            "domain": normalized,
+            "identity": dkim_identity,
+            "serial": hex(cert.serial_number),
+            "key_path": str(key_path),
+            "cert_path": str(cert_path),
+            "created": False,
+        }
+
+    SERVER_DIR.mkdir(parents=True, exist_ok=True)
+    priv = rsa_handler.generate_keypair(2048)
+    csr = (
+        x509.CertificateSigningRequestBuilder()
+        .subject_name(x509.Name([
+            x509.NameAttribute(NameOID.COMMON_NAME, f"dkim.{normalized}"),
+            x509.NameAttribute(NameOID.EMAIL_ADDRESS, dkim_identity),
+        ]))
+        .add_extension(
+            x509.SubjectAlternativeName([x509.RFC822Name(dkim_identity)]),
+            critical=False,
+        )
+        .sign(priv, hashes.SHA256())
+    )
+    csr_pem = csr.public_bytes(serialization.Encoding.PEM)
+    resp = request("127.0.0.1", 9000, {
+        "op": "ca.sign_csr",
+        "csr_pem_b64": b64(csr_pem),
+        "email": dkim_identity,
+    })
+    if not resp.get("ok"):
+        raise RuntimeError(f"CA refused: {resp.get('error')}")
+
+    cert_pem = unb64(resp["cert_pem_b64"])
+    cert = x509.load_pem_x509_certificate(cert_pem)
+    serial_hex = hex(cert.serial_number)
+    kds_client.put_cert(dkim_identity, serial_hex, cert_pem)
+
+    key_path.write_bytes(rsa_handler.serialize_private_pem(priv, b"mta-domain-key"))
+    cert_path.write_bytes(cert_pem)
+    return {
+        "domain": normalized,
+        "identity": dkim_identity,
+        "serial": serial_hex,
+        "key_path": str(key_path),
+        "cert_path": str(cert_path),
+        "created": True,
+    }
+
+
 def _lookup_principal_role(email: str) -> str | None:
     try:
         from securemail.db_conn import get_conn
@@ -285,23 +359,14 @@ def send_secure_email(
         "Content-Type": "application/smime-lite; version=1",
     }
 
-    # 7. Optional DKIM by sender's domain (normally MTA does this, demo allows sender)
-    dkim_value = None
-    if dkim_sign:
-        # Use a domain key registered as _dkim.<domain>
-        dkim_key_path = Path(f"data/server/dkim_{domain}_key.pem")
-        if dkim_key_path.exists():
-            from securemail.crypto import rsa_handler as rh
-            dk = rh.load_private_pem(dkim_key_path.read_bytes(), b"dkim-key")
-            dkim_value = dkim_signer.sign(headers, envelope, domain, "default", dk)
-
-    # 8. Send per recipient
+    # 7. Send per recipient. DKIM is an MTA/domain policy, so SMTP server
+    # signs controlled domains before SPF/DKIM/DMARC evaluation.
     results = []
     for index, rcpt in enumerate(recipient_emails):
         r = smtp_client.send_mail(
             smtp_host, smtp_port, domain,
             ctx["email"], st["ticket_v"], st["k_c_v"],
-            ctx["email"], rcpt, envelope, headers, dkim_value,
+            ctx["email"], rcpt, envelope, headers, None,
             sender_copy_envelope=sender_copy_envelope if index == 0 else None,
         )
         results.append((rcpt, r))
@@ -466,13 +531,13 @@ def classify_security(
         if keyword in text:
             issues.append(f"Suspicious keyword: {keyword}")
             break
-    if sender_addr and not sender_addr.lower().endswith("@mail.local"):
-        issues.append("Sender is outside @mail.local")
+    if sender_addr and not sender_addr.lower().endswith("@mail.local") and dkim != "pass":
+        issues.append("External sender without DKIM pass")
 
     if issues:
         return ("WARNING", "; ".join(issues))
 
-    return ("SECURE", "Signature valid, SPF pass, DMARC accept")
+    return ("SECURE", "Signature valid, SPF pass, DKIM trusted, DMARC accept")
 
 
 # ======================================================================
