@@ -41,6 +41,7 @@ def as_request(id_c: str, password: str) -> dict:
         "k_c_tgs": unb64(payload["k_c_tgs_b64"]),
         "tgt": payload["tgt"],
         "lifetime": payload["lifetime"],
+        "role": payload.get("role"),
     }
 
 

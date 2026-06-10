@@ -104,6 +104,10 @@ class AppState:
     def email(self) -> str | None:
         return self.ctx.get("email") if self.ctx else None
 
+    @property
+    def role(self) -> str | None:
+        return self.ctx.get("role", "user") if self.ctx else None
+
 
 class SecureMailApp(tk.Tk):
     def __init__(self):
@@ -224,6 +228,7 @@ class SecureMailApp(tk.Tk):
         self._add_service_toggle_button(parent).pack(fill="x", padx=12, pady=3)
         ttk.Button(parent, text="Refresh services", command=self.refresh_services).pack(fill="x", padx=12, pady=3)
         ttk.Button(parent, text="Logout", command=self.logout).pack(fill="x", padx=12, pady=3)
+        self._update_nav_access()
 
     def _add_service_toggle_button(self, parent: tk.Widget) -> ttk.Button:
         btn = ttk.Button(parent, text="Start all services", style="Primary.TButton",
@@ -292,9 +297,31 @@ class SecureMailApp(tk.Tk):
 
     def _set_header_user(self):
         email = self.state_data.email or "Not logged in"
-        self._set_pill(self.user_pill, email, "info" if self.state_data.email else "gray")
+        role = self.state_data.role
+        label = f"{email} ({role})" if role else email
+        self._set_pill(self.user_pill, label, "info" if self.state_data.email else "gray")
         self._set_pill(self.tgt_pill, "TGT ACTIVE" if self.state_data.ctx else "NO TGT",
                        "success" if self.state_data.ctx else "gray")
+        self._update_nav_access()
+
+    def _update_nav_access(self):
+        if not hasattr(self, "_nav_buttons"):
+            return
+        role = self.state_data.role
+        allowed = {"login"}
+        if role:
+            allowed.update({"inbox", "sent", "compose", "security"})
+        if role == "admin":
+            allowed.update({"monitor", "scenario"})
+
+        for key, btn in self._nav_buttons.items():
+            btn.configure(state="normal" if key in allowed else "disabled")
+
+    def _require_admin(self) -> bool:
+        if self.state_data.role == "admin":
+            return True
+        messagebox.showwarning("SecureMail", "Man hinh nay chi danh cho admin.")
+        return False
 
     # ------------------------------------------------------------------
     # Background tasks
@@ -401,16 +428,13 @@ class SecureMailApp(tk.Tk):
         reg_email_entry = self._field(register_inner, "Email")
         reg_email_entry.insert(0, "carol@mail.local")
         reg_password_entry = self._field(register_inner, "Password", show="*")
-        tk.Label(register_inner, text="Role", bg=COLORS["surface"], fg=COLORS["muted"]).pack(anchor="w", pady=(10, 3))
-        role_var = tk.StringVar(value="user")
-        ttk.Combobox(register_inner, textvariable=role_var, values=("user", "admin", "mailing_list_manager"),
-                     state="readonly").pack(fill="x", ipady=4)
+        reg_confirm_entry = self._field(register_inner, "Confirm password", show="*")
         ttk.Button(register_inner, text="Generate keypair + Register", style="Primary.TButton",
                    command=lambda: self._register_account(
                        reg_email_entry.get().strip(),
                        reg_password_entry.get(),
+                       reg_confirm_entry.get(),
                        name_entry.get().strip(),
-                       role_var.get(),
                    )).pack(anchor="w", pady=14)
 
         self._append_log("1. Doc private key local / tao keypair khi register")
@@ -436,13 +460,16 @@ class SecureMailApp(tk.Tk):
 
         self._run_task("Login", action, done)
 
-    def _register_account(self, email: str, password: str, display_name: str, role: str):
+    def _register_account(self, email: str, password: str, confirm_password: str, display_name: str):
         if not email or not password:
             messagebox.showwarning("SecureMail", "Nhap email va password de register.")
             return
+        if password != confirm_password:
+            messagebox.showwarning("SecureMail", "Password va confirm password khong khop.")
+            return
 
         def action():
-            return client_core.register(email, password, display_name, role)
+            return client_core.public_register(email, password, display_name)
 
         def done(result: dict[str, Any]):
             self._append_log(f"Registered {email}; serial={result.get('serial')}")
@@ -932,6 +959,8 @@ class SecureMailApp(tk.Tk):
     # Monitor
     # ------------------------------------------------------------------
     def show_monitor(self):
+        if not self._require_admin():
+            return
         self._clear_main()
         self.operation_log = self._build_right_panel("Monitor Detail")
         self._page_title("Monitoring Dashboard", "Service status, metrics, audit event stream va alert bao mat.")
@@ -1075,6 +1104,8 @@ class SecureMailApp(tk.Tk):
     # Scenario Lab
     # ------------------------------------------------------------------
     def show_scenarios(self):
+        if not self._require_admin():
+            return
         self._clear_main()
         self.operation_log = self._build_right_panel("Scenario Evidence")
         self._page_title("Scenario Lab", "Chay bootstrap va 8 kich ban bao mat tu run_demo.py.")

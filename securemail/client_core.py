@@ -26,6 +26,8 @@ from securemail.ticket_service.as_tgs_server import MAIL_SRV_NAME
 
 USER_DIR = Path("data/users")
 SESSION_FILE = Path("data/active_session.json")
+SESSION_SCHEMA_VERSION = 2
+RESERVED_PUBLIC_REGISTER_EMAILS = {"admin@mail.local"}
 
 
 def _user_path(email: str, suffix: str) -> Path:
@@ -44,7 +46,9 @@ def save_session(ctx: dict):
     """
     SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
     data = {
+        "schema_version": SESSION_SCHEMA_VERSION,
         "email": ctx["email"],
+        "role": ctx.get("role", "user"),
         "tgt": ctx["tgt"],
         "k_c_tgs_b64": base64.b64encode(ctx["k_c_tgs"]).decode("ascii"),
         "cert_pem": ctx["cert_pem"].decode("utf-8"),
@@ -59,11 +63,16 @@ def load_session() -> dict | None:
         return None
     try:
         data = json.loads(SESSION_FILE.read_text(encoding="utf-8"))
+        if data.get("schema_version") != SESSION_SCHEMA_VERSION:
+            print("[Session] Ignoring old session format. Please login again.")
+            clear_session()
+            return None
         privkey = rsa_handler.load_private_pem(
             data["privkey_pem"].encode("utf-8"), None
         )
         return {
             "email": data["email"],
+            "role": data.get("role", "user"),
             "tgt": data["tgt"],
             "k_c_tgs": base64.b64decode(data["k_c_tgs_b64"]),
             "cert_pem": data["cert_pem"].encode("utf-8"),
@@ -71,6 +80,7 @@ def load_session() -> dict | None:
         }
     except Exception as exc:
         print(f"[Session] Failed to load session: {exc}")
+        clear_session()
         return None
 
 
@@ -170,6 +180,27 @@ def register(email: str, password: str, display_name: str = "", role: str = "use
     return {"cert_pem": cert_pem, "serial": serial_hex}
 
 
+def public_register(email: str, password: str, display_name: str = ""):
+    """Register a self-service account. Public signup always creates a normal user."""
+    normalized = email.strip().lower()
+    if normalized in RESERVED_PUBLIC_REGISTER_EMAILS:
+        raise RuntimeError("admin account can only be created by bootstrap")
+    return register(normalized, password, display_name, role="user")
+
+
+def _lookup_principal_role(email: str) -> str | None:
+    try:
+        from securemail.db_conn import get_conn
+        conn = get_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT role FROM ticket.principals WHERE id_c=%s", (email,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
+    except Exception:
+        return None
+
+
 def login(email: str, password: str) -> dict:
     """AS-REQ → get TGT. Also load local private key.
 
@@ -182,6 +213,7 @@ def login(email: str, password: str) -> dict:
     as_resp = ts_client.as_request(email, password)
     return {
         "email": email,
+        "role": as_resp.get("role") or _lookup_principal_role(email) or "user",
         "privkey": privkey,
         "cert_pem": cert_pem,
         "tgt": as_resp["tgt"],

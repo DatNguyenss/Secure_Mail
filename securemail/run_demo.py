@@ -82,6 +82,13 @@ def _user_registered(email: str) -> bool:
     return count > 0
 
 
+def _ensure_principal_role(email: str, role: str):
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE ticket.principals SET role=%s WHERE id_c=%s", (role, email))
+    conn.close()
+
+
 def bootstrap():
     _banner("BOOTSTRAP")
 
@@ -107,8 +114,8 @@ def bootstrap():
         Path(f"data/server/dkim_{DOMAIN}_cert.pem"),
     )
 
-    # 3. Register 3 users
-    print("[boot] registering users Alice / Bob / Eve ...")
+    # 3. Register demo users and default admin
+    print("[boot] registering users Alice / Bob / Eve / Admin ...")
     for email, pw, display, role in [
         (f"alice@{DOMAIN}", "alice-pw", "Alice", "user"),
         (f"bob@{DOMAIN}",   "bob-pw",   "Bob",   "user"),
@@ -117,7 +124,8 @@ def bootstrap():
     ]:
         # Skip if already registered (idempotent)
         if _user_registered(email):
-            print(f"  skip {email} (already exists)")
+            _ensure_principal_role(email, role)
+            print(f"  skip {email} (already exists, role={role})")
             continue
         client_core.register(email, pw, display, role)
 

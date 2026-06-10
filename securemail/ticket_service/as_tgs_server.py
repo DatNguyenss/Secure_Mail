@@ -133,6 +133,7 @@ def handle_as_req(req: dict) -> dict:
         "lifetime": TGT_LIFETIME,
         "tgt": tgt,
         "nonce_echo": ts1,
+        "role": p["role"],
     }
     _audit("AS_REQ_OK", f"id_c={id_c}")
     return {"ok": True, "as_rep_b64": _seal_for_user(kc, as_rep_payload),

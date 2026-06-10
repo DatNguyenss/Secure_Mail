@@ -228,7 +228,11 @@ def cli_main():
             _usage_error("missing email/password", "register <email> <password> [<display>]")
         email, password = args[0], args[1]
         display = args[2] if len(args) > 2 else ""
-        client_core.register(email, password, display)
+        try:
+            client_core.public_register(email, password, display)
+        except RuntimeError as exc:
+            print(f"Register failed: {exc}")
+            sys.exit(1)
 
     # --- login: authenticate + save session ---
     elif cmd_name == "login":
@@ -238,6 +242,7 @@ def cli_main():
         ctx = client_core.login(email, password)
         client_core.save_session(ctx)
         print(f"Logged in as {email}. Session saved.")
+        print(f"  Role={ctx.get('role', 'user')}")
         print(f"  TGT length={len(ctx['tgt'])}")
 
     # --- logout: clear session ---
@@ -331,6 +336,7 @@ def cli_main():
             print("No active session.")
         else:
             print(f"Logged in as: {ctx['email']}")
+            print(f"  Role: {ctx.get('role', 'user')}")
             print(f"  TGT length: {len(ctx['tgt'])}")
 
     else:

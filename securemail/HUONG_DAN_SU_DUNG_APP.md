@@ -98,10 +98,12 @@ Dang nhap:
 Dang ky user moi:
 
 1. Nhap display name, email, password.
-2. Chon role: `user`, `admin`, hoac `mailing_list_manager`.
+2. Nhap lai password o confirm password.
 3. Bam `Generate keypair + Register`.
 
 Khi dang ky thanh cong, app tao local private key/cert trong `data/users`, dang ky principal voi Ticket Service, va push cert len KDS.
+Tai khoan dang ky tu man hinh nay luon co role `user`. Tai khoan `admin` duoc tao san khi chay `Bootstrap`, khong cho nguoi dung tu dang ky admin.
+Neu app da luu session cu, logout hoac mo lai app roi dang nhap lai de cap nhat role moi nhat tu Ticket Service.
 
 ## 6. Gui email bao mat
 
