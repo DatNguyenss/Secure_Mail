@@ -194,10 +194,7 @@ class SecureMailApp(tk.Tk):
         self.nav_shell.grid(row=0, column=0, sticky="ns")
         self.nav_shell.grid_propagate(False)
         self.nav_canvas = tk.Canvas(self.nav_shell, bg=COLORS["surface"], highlightthickness=0, borderwidth=0)
-        self.nav_scrollbar = ttk.Scrollbar(self.nav_shell, orient="vertical", command=self.nav_canvas.yview)
-        self.nav_canvas.configure(yscrollcommand=self.nav_scrollbar.set)
-        self.nav_canvas.pack(side="left", fill="both", expand=True)
-        self.nav_scrollbar.pack(side="right", fill="y")
+        self.nav_canvas.pack(fill="both", expand=True)
         self.nav = tk.Frame(self.nav_canvas, bg=COLORS["surface"])
         self._nav_window = self.nav_canvas.create_window((0, 0), window=self.nav, anchor="nw")
         self.nav.bind("<Configure>", self._sync_nav_scrollregion)
@@ -259,11 +256,17 @@ class SecureMailApp(tk.Tk):
 
         role = self.state_data.role
 
+        section("Services")
+        self._add_service_toggle_button(parent).pack(fill="x", padx=12, pady=3)
+        ttk.Button(parent, text="Refresh services", command=self.refresh_services).pack(fill="x", padx=12, pady=3)
+
         if not role:
+            ttk.Separator(parent).pack(fill="x", padx=12, pady=18)
             section("Account")
             nav_button("login", "Login / Register", self.show_login)
             return
 
+        ttk.Separator(parent).pack(fill="x", padx=12, pady=18)
         section("User App")
         nav_button("inbox", "Inbox", self.show_inbox)
         nav_button("sent", "Sent", self.show_sent)
@@ -279,10 +282,6 @@ class SecureMailApp(tk.Tk):
 
             section("Scenario Lab")
             nav_button("scenario", "Scenarios", self.show_scenarios)
-
-            ttk.Separator(parent).pack(fill="x", padx=12, pady=18)
-            self._add_service_toggle_button(parent).pack(fill="x", padx=12, pady=3)
-            ttk.Button(parent, text="Refresh services", command=self.refresh_services).pack(fill="x", padx=12, pady=3)
 
         ttk.Separator(parent).pack(fill="x", padx=12, pady=18)
         ttk.Button(parent, text="Logout", command=self.logout).pack(fill="x", padx=12, pady=3)
@@ -842,7 +841,8 @@ class SecureMailApp(tk.Tk):
         recovery_inner.pack(fill="both", expand=True, padx=18, pady=18)
         tk.Label(recovery_inner, text="Key Recovery", bg=COLORS["surface"], fg=COLORS["text"],
                  font=("Segoe UI Semibold", 14)).pack(anchor="w")
-        rec_email_var = tk.StringVar(value=self.state_data.email or "bob@mail.local")
+        recovery_email = self.state_data.email or f"bob@{DOMAIN}"
+        rec_email_var = tk.StringVar(value=recovery_email)
         self._field_with_var(recovery_inner, "Email", rec_email_var)
         tk.Label(recovery_inner, text="Shares", bg=COLORS["surface"], fg=COLORS["muted"]).pack(anchor="w", pady=(10, 3))
         share_frame = tk.Frame(recovery_inner, bg=COLORS["surface"])
@@ -888,6 +888,11 @@ class SecureMailApp(tk.Tk):
     def _recover_key(self, email: str, shares: list[int]):
         if len(shares) != 2:
             messagebox.showwarning("SecureMail", "Chon dung 2 share trong 3 share.")
+            return
+        try:
+            client_core.require_recovery_authorized(self.state_data.ctx, email)
+        except PermissionError as exc:
+            messagebox.showwarning("SecureMail", str(exc))
             return
 
         def action():
@@ -1327,6 +1332,8 @@ def friendly_error(exc: BaseException) -> str:
     text = str(exc)
     lower = text.lower()
     if isinstance(exc, FileNotFoundError):
+        if "share" in lower and "not found in database" in lower:
+            return f"Escrow share not found: {text}. Re-run Bootstrap to create recovery shares for existing users."
         return "Local certificate/private key not found. Please register or bootstrap first."
     if "connection refused" in lower or "winerror 10061" in lower:
         if "9000" in text:

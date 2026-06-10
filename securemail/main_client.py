@@ -323,6 +323,7 @@ def cli_main():
         default_email = ctx["email"] if ctx is not None else None
         try:
             email, shares = _parse_recover_args(args, default_email)
+            client_core.require_recovery_authorized(ctx, email)
             client_core.recover_user_key(email, shares)
         except Exception as exc:
             print(f"Recovery failed: {exc}")
@@ -561,6 +562,7 @@ class SecureMailShell(cmd.Cmd):
         default_email = self._ctx["email"] if self._ctx is not None else None
         try:
             email, shares = _parse_recover_args(parts, default_email)
+            client_core.require_recovery_authorized(self._ctx, email)
             client_core.recover_user_key(email, shares)
             print(f"Key for {email} recovered successfully.")
         except Exception as exc:

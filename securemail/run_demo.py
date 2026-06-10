@@ -108,12 +108,13 @@ def bootstrap():
     )
     # 3. Register demo users and default admin
     print("[boot] registering users Alice / Bob / Eve / Admin ...")
-    for email, pw, display, role in [
+    demo_users = [
         (f"alice@{DOMAIN}", "alice-pw", "Alice", "user"),
         (f"bob@{DOMAIN}",   "bob-pw",   "Bob",   "user"),
         (f"eve@{DOMAIN}",   "eve-pw",   "Eve",   "user"),
         (f"admin@{DOMAIN}", "admin-pw", "Admin", "admin"),
-    ]:
+    ]
+    for email, pw, display, role in demo_users:
         # Skip if already registered (idempotent)
         if _user_registered(email):
             _ensure_principal_role(email, role)
@@ -132,10 +133,10 @@ def bootstrap():
     crl = crl_manager.build_crl()
     kds_client.sync_crl(crl)
 
-    # 6. Demo key escrow — encrypt copy of Bob's private key
-    print("[boot] escrowing Bob's private key (2-of-3 Shamir) ...")
-    bob_key_pem = Path(f"data/users/bob_at_{DOMAIN}.key.pem").read_bytes()
-    key_escrow.escrow_key(f"bob@{DOMAIN}", bob_key_pem)
+    # 6. Key escrow for every local identity
+    print("[boot] escrowing local private keys (2-of-3 Shamir) ...")
+    for email in client_core.escrow_local_user_keys():
+        print(f"  escrowed {email}")
 
     print("[boot] DONE.")
 
@@ -382,14 +383,18 @@ def scenario_6_reusable_ticket():
 
 def scenario_7_key_recovery():
     _banner("Scenario 7 — Key Recovery (A9 — Shamir 2-of-3, bonus)")
-    recovered = key_escrow.recover_key(f"bob@{DOMAIN}", [1, 2])
-    expected = Path(f"data/users/bob_at_{DOMAIN}.key.pem").read_bytes()
-    assert recovered == expected, "Recovered key mismatch!"
-    print(f"  [OK] PASS — recovered {len(recovered)} bytes using 2 of 3 shares (bytes identical)")
-    # Try with different share combination
+    for user in ("alice", "bob", "eve", "admin"):
+        email = f"{user}@{DOMAIN}"
+        safe = email.replace("@", "_at_")
+        expected = Path(f"data/users/{safe}.key.pem").read_bytes()
+        recovered = key_escrow.recover_key(email, [1, 2])
+        assert recovered == expected, f"Recovered key mismatch for {email}!"
+        print(f"  [OK] {email}: recovered {len(recovered)} bytes using shares 1+2")
+
     recovered2 = key_escrow.recover_key(f"bob@{DOMAIN}", [1, 3])
-    assert recovered2 == expected
-    print(f"  [OK] PASS — shares 1+3 also work")
+    expected2 = Path(f"data/users/bob_at_{DOMAIN}.key.pem").read_bytes()
+    assert recovered2 == expected2
+    print("  [OK] Bob shares 1+3 also work")
 
 
 def scenario_8_subsession_hkdf():

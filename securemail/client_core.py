@@ -138,6 +138,36 @@ def recover_user_key(email: str, share_indices: list[int] | None = None) -> byte
     return recovered_pem
 
 
+def can_recover_key(actor_ctx: dict | None, target_email: str) -> bool:
+    if actor_ctx is None:
+        return False
+    actor_email = actor_ctx.get("email", "")
+    actor_role = actor_ctx.get("role", "user")
+    return actor_role == "admin" or actor_email.lower() == target_email.lower()
+
+
+def require_recovery_authorized(actor_ctx: dict | None, target_email: str):
+    if actor_ctx is None:
+        raise PermissionError("login required for key recovery")
+    if not can_recover_key(actor_ctx, target_email):
+        raise PermissionError("only admin can recover another user's key")
+
+
+def escrow_local_user_keys() -> list[str]:
+    """Create/update escrow shares for every local private key file."""
+    from securemail.ca_service import key_escrow
+
+    USER_DIR.mkdir(parents=True, exist_ok=True)
+    escrowed: list[str] = []
+    suffix = ".key.pem"
+    for key_path in sorted(USER_DIR.glob(f"*{suffix}")):
+        safe_name = key_path.name[:-len(suffix)]
+        email = safe_name.replace("_at_", "@")
+        key_escrow.escrow_key(email, key_path.read_bytes())
+        escrowed.append(email)
+    return escrowed
+
+
 def register(email: str, password: str, display_name: str = "", role: str = "user"):
     """Đăng ký user mới: tạo keypair, CSR → CA → cert, push KDS, đăng ký tại Ticket Service.
 
@@ -185,6 +215,11 @@ def register(email: str, password: str, display_name: str = "", role: str = "use
     _user_path(email, "key.pem").write_bytes(priv_pem)
     _user_path(email, "cert.pem").write_bytes(cert_pem)
     _user_path(email, "salt.bin").write_bytes(salt)
+
+    # Escrow the password-protected private key so any registered user can
+    # recover their local key file later with 2-of-3 Shamir shares.
+    from securemail.ca_service import key_escrow
+    key_escrow.escrow_key(email, priv_pem)
 
     print(f"[REG] Registered {email} — serial={serial_hex}")
     return {"cert_pem": cert_pem, "serial": serial_hex}
