@@ -12,17 +12,24 @@ Chế độ 1 — Stateful CLI (lệnh đơn, lưu phiên vào file):
   python -m securemail.main_client sent-read <id>
   python -m securemail.main_client read_sent <id>      # alias
   python -m securemail.main_client recover [<email>] [<share1> <share2>]
+  python -m securemail.main_client admin-register <email> <password> [<display>]
   python -m securemail.main_client status
-  python -m securemail.main_client gui
+  python -m securemail.main_client gui [client|monitor|all]
+  python -m securemail.main_client gui-monitor
 
 Chế độ 2 — Interactive Shell (REPL, phiên trong bộ nhớ):
   python -m securemail.main_client              # khởi chạy shell tương tác
 """
 import cmd
+import contextlib
 import os
 import sys
 
 from securemail import client_core
+
+with contextlib.suppress(Exception):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 
 # ======================================================================
@@ -217,9 +224,17 @@ def cli_main():
         _print_usage()
         return
 
-    if cmd_name == "gui":
-        from securemail.gui.app import main as gui_main
-        gui_main()
+    if cmd_name in ("gui", "gui-client", "gui-monitor"):
+        from securemail.gui.app import launch
+        if cmd_name == "gui-client":
+            mode = "client"
+        elif cmd_name == "gui-monitor":
+            mode = "monitor"
+        else:
+            mode = args[0] if args else "client"
+        if mode not in {"client", "monitor", "all"}:
+            _usage_error("invalid GUI mode", "gui [client|monitor|all]")
+        launch(mode)
         return
 
     # --- register (unchanged, no session needed) ---
@@ -329,6 +344,21 @@ def cli_main():
             print(f"Recovery failed: {exc}")
             print("Usage: recover [<email>] [<share1> <share2>]")
             sys.exit(1)
+
+    # --- admin-register: create another admin from saved admin session ---
+    elif cmd_name == "admin-register":
+        if len(args) < 2:
+            _usage_error("missing email/password", "admin-register <email> <password> [<display>]")
+        ctx = _load_session_or_exit()
+        email, password = args[0], args[1]
+        display = args[2] if len(args) > 2 else ""
+        try:
+            result = client_core.admin_register_account(ctx, email, password, display, role="admin")
+        except Exception as exc:
+            print(f"Admin register failed: {exc}")
+            sys.exit(1)
+        print(f"Created admin account: {result['email']}")
+        print(f"  Serial={result.get('serial')}")
 
     # --- status: show who is logged in ---
     elif cmd_name == "status":
@@ -578,6 +608,7 @@ class SecureMailShell(cmd.Cmd):
             print("No user logged in.")
         else:
             print(f"Logged in as: {self._ctx['email']}")
+            print(f"  Role: {self._ctx.get('role', 'user')}")
             print(f"  TGT length: {len(self._ctx['tgt'])}")
             print(f"  Key size: RSA-{self._ctx['privkey'].key_size}")
 

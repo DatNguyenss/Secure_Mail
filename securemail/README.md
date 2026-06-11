@@ -76,15 +76,33 @@ python -m securemail.main_client
 
 ```bash
 # Chạy từ thư mục project root Secure_Mail
-python -m securemail.gui.app
+python -m securemail.gui.app --mode client
+# hoặc mở nhanh trên Windows
+run_client.bat
+
+# Monitor/admin dashboard
+python -m securemail.main_monitor
 # hoặc
-python -m securemail.main_client gui
+run_monitor.bat
 ```
 
-GUI gom 3 vùng đúng luồng demo:
-- User App: login/register, compose, inbox, sent, security badge, mail detail.
-- Monitoring Dashboard: trạng thái CA/KDS/Ticket/SMTP/POP3, metrics, audit log, alerts.
-- Scenario Lab: bootstrap, chạy từng scenario hoặc toàn bộ 8 scenario và xem console evidence.
+GUI hiện tách thành 2 lệnh chính:
+
+| App | Lệnh | Vai trò |
+|---|---|---|
+| Client | `python -m securemail.gui.app --mode client` | Gmail-like dark mail app for login/register user, large Compose action, inbox, sent, mail detail, security/recovery. No service/debug log panel. |
+| Monitor | `python -m securemail.main_monitor` | Dark admin dashboard: start/stop services, bootstrap demo data before first admin login, metrics, audit log, warning/alerts, DKIM, scenario evidence, account admin. Detail panel is hidden by default and can be opened when needed. |
+
+Nếu cần mở lại giao diện gom tất cả như bản cũ:
+
+```bash
+python -m securemail.gui.app --mode all
+```
+
+Luật tài khoản:
+- Public Register trong Client luôn tạo role `user`.
+- Nếu `admin@mail.local` chưa tồn tại, mở Monitor, bấm `Start all services`, rồi bấm `Bootstrap demo data` ở màn hình Monitor Login.
+- Muốn tạo tài khoản `admin` mới phải login bằng admin hiện có trong Monitor, vào `Accounts`, hoặc dùng CLI `python -m securemail.main_client admin-register <email> <password> [<display>]` sau khi session admin đã login.
 
 Trước khi dùng đầy đủ chức năng, mở các service như bảng "Chạy" ở trên. Nếu service hoặc SQL Server chưa bật, GUI vẫn mở được và sẽ hiển thị lỗi thân thiện ở panel bên phải.
 

@@ -89,6 +89,19 @@ def _ensure_principal_role(email: str, role: str):
     conn.close()
 
 
+def _demo_identity_usable(email: str, password: str, role: str) -> bool:
+    if not _user_registered(email):
+        return False
+    try:
+        ctx = client_core.login(email, password)
+    except Exception as exc:
+        print(f"  repair {email} (demo password/key mismatch: {exc})")
+        return False
+    if ctx.get("role") != role:
+        _ensure_principal_role(email, role)
+    return True
+
+
 def bootstrap():
     _banner("BOOTSTRAP")
 
@@ -115,9 +128,9 @@ def bootstrap():
         (f"admin@{DOMAIN}", "admin-pw", "Admin", "admin"),
     ]
     for email, pw, display, role in demo_users:
-        # Skip if already registered (idempotent)
-        if _user_registered(email):
-            _ensure_principal_role(email, role)
+        # Skip only when the existing local key + Ticket principal match the
+        # documented demo password. Otherwise repair the demo identity in place.
+        if _demo_identity_usable(email, pw, role):
             print(f"  skip {email} (already exists, role={role})")
             continue
         client_core.register(email, pw, display, role)

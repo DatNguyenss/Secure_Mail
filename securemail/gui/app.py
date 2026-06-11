@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime as dt
+import argparse
 import os
 import queue
 import signal
@@ -31,21 +32,31 @@ from securemail import client_core
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DOMAIN = "mail.local"
+APP_MODES = {"client", "monitor", "all"}
 
 
 COLORS = {
-    "bg": "#F7F8FA",
-    "surface": "#FFFFFF",
-    "surface_2": "#EEF2F7",
-    "text": "#17202A",
-    "muted": "#697386",
-    "border": "#D8DEE8",
-    "primary": "#2563EB",
-    "success": "#15803D",
-    "warning": "#B45309",
-    "danger": "#B91C1C",
-    "info": "#0E7490",
+    "bg": "#0E1117",
+    "auth_bg": "#0B1020",
+    "nav": "#111318",
+    "header": "#0A0C10",
+    "surface": "#181B22",
+    "surface_2": "#20242D",
+    "surface_3": "#2A303B",
+    "text": "#F4F7FB",
+    "muted": "#A4ADBA",
+    "subtle": "#707A89",
+    "border": "#343A46",
+    "primary": "#5B7CFA",
+    "primary_2": "#A855F7",
+    "success": "#22C55E",
+    "warning": "#F59E0B",
+    "danger": "#F43F5E",
+    "info": "#38BDF8",
     "gray": "#64748B",
+    "input": "#10141C",
+    "table": "#121720",
+    "table_alt": "#181E29",
 }
 
 
@@ -110,9 +121,10 @@ class AppState:
 
 
 class SecureMailApp(tk.Tk):
-    def __init__(self):
+    def __init__(self, mode: str = "client"):
         super().__init__()
-        self.title("SecureMail Desktop")
+        self.mode = mode if mode in APP_MODES else "client"
+        self.title(self._window_title())
         self.geometry("1320x840")
         self.minsize(1100, 720)
         self.configure(bg=COLORS["bg"])
@@ -124,7 +136,18 @@ class SecureMailApp(tk.Tk):
         self._service_labels: dict[str, tk.Label] = {}
         self._service_toggle_buttons: list[ttk.Button] = []
         self._service_processes: dict[str, subprocess.Popen] = {}
-        self._nav_buttons: dict[str, ttk.Button] = {}
+        self._nav_buttons: dict[str, tk.Widget] = {}
+        self._active_nav_key = "login"
+        self._mail_stat_labels: dict[str, tk.Label] = {}
+        self._detail_panel_visible = False
+        self._client_auth_view = "login"
+        self._auth_error_message = ""
+        self._auth_error_label: tk.Label | None = None
+        self._send_in_progress = False
+        self._compose_send_button: ttk.Button | None = None
+        self._compose_status_label: tk.Label | None = None
+        self.operation_log: tk.Text | None = None
+        self._log_history: list[str] = []
 
         self._configure_styles()
         self._build_shell()
@@ -141,61 +164,126 @@ class SecureMailApp(tk.Tk):
             style.theme_use("clam")
         style.configure(".", font=("Segoe UI", 10), background=COLORS["bg"], foreground=COLORS["text"])
         style.configure("TFrame", background=COLORS["bg"])
-        style.configure("Surface.TFrame", background=COLORS["surface"], relief="solid", borderwidth=1)
-        style.configure("Nav.TFrame", background=COLORS["surface"])
+        style.configure("Surface.TFrame", background=COLORS["surface"], relief="flat", borderwidth=0)
+        style.configure("Nav.TFrame", background=COLORS["nav"])
         style.configure("TLabel", background=COLORS["bg"], foreground=COLORS["text"])
         style.configure("Muted.TLabel", foreground=COLORS["muted"], background=COLORS["bg"])
         style.configure("Surface.TLabel", background=COLORS["surface"], foreground=COLORS["text"])
-        style.configure("Title.TLabel", font=("Segoe UI Semibold", 18), background=COLORS["bg"])
+        style.configure("Title.TLabel", font=("Segoe UI Semibold", 20), background=COLORS["bg"], foreground=COLORS["text"])
         style.configure("Section.TLabel", font=("Segoe UI Semibold", 12), background=COLORS["surface"])
-        style.configure("TButton", padding=(12, 8))
-        style.configure("Primary.TButton", padding=(14, 9))
+        style.configure(
+            "TEntry",
+            padding=(10, 7),
+            fieldbackground=COLORS["input"],
+            background=COLORS["input"],
+            foreground=COLORS["text"],
+            bordercolor=COLORS["border"],
+            lightcolor=COLORS["border"],
+            darkcolor=COLORS["border"],
+            insertcolor=COLORS["text"],
+        )
+        style.map("TEntry", bordercolor=[("focus", COLORS["primary"])])
+        style.configure(
+            "TCombobox",
+            padding=(8, 6),
+            fieldbackground=COLORS["input"],
+            background=COLORS["surface_2"],
+            foreground=COLORS["text"],
+            bordercolor=COLORS["border"],
+            arrowcolor=COLORS["text"],
+        )
+        style.map("TCombobox", fieldbackground=[("readonly", COLORS["input"])], foreground=[("readonly", COLORS["text"])])
+        style.configure("TCheckbutton", background=COLORS["surface"], foreground=COLORS["text"], padding=(2, 4))
+        style.configure("TButton", padding=(13, 8), background=COLORS["surface_2"], foreground=COLORS["text"], borderwidth=0)
+        style.map("TButton", background=[("active", COLORS["surface_3"]), ("disabled", COLORS["surface_2"])])
+        style.configure("Primary.TButton", padding=(15, 9), background=COLORS["primary"], foreground="#FFFFFF", borderwidth=0)
         style.map("Primary.TButton", foreground=[("active", "#FFFFFF"), ("!disabled", "#FFFFFF")],
-                  background=[("active", "#1D4ED8"), ("!disabled", COLORS["primary"])])
-        style.configure("Nav.TButton", anchor="w", padding=(12, 10), background=COLORS["surface"])
-        style.configure("Treeview", rowheight=30, fieldbackground=COLORS["surface"], background=COLORS["surface"])
-        style.configure("Treeview.Heading", font=("Segoe UI Semibold", 10), padding=(6, 6))
+                  background=[("active", "#3F5FEA"), ("disabled", COLORS["surface_3"]), ("!disabled", COLORS["primary"])])
+        style.configure("Secondary.TButton", padding=(13, 8), background=COLORS["surface_2"], foreground=COLORS["text"], borderwidth=0)
+        style.configure("Danger.TButton", padding=(13, 8), background=COLORS["danger"], foreground="#FFFFFF", borderwidth=0)
+        style.configure("Nav.TButton", anchor="w", padding=(14, 12), background=COLORS["nav"], foreground=COLORS["muted"], borderwidth=0)
+        style.map("Nav.TButton", background=[("active", COLORS["surface_2"])], foreground=[("active", COLORS["text"])])
+        style.configure(
+            "Treeview",
+            rowheight=34,
+            fieldbackground=COLORS["table"],
+            background=COLORS["table"],
+            foreground=COLORS["text"],
+            bordercolor=COLORS["border"],
+            lightcolor=COLORS["border"],
+            darkcolor=COLORS["border"],
+        )
+        style.map("Treeview", background=[("selected", COLORS["primary"])], foreground=[("selected", "#FFFFFF")])
+        style.configure(
+            "Treeview.Heading",
+            font=("Segoe UI Semibold", 10),
+            padding=(8, 8),
+            background=COLORS["surface_2"],
+            foreground=COLORS["muted"],
+            bordercolor=COLORS["border"],
+        )
         style.configure("Horizontal.TSeparator", background=COLORS["border"])
 
+    def _window_title(self) -> str:
+        titles = {
+            "client": "SecureMail Client",
+            "monitor": "SecureMail Monitor",
+            "all": "SecureMail Desktop",
+        }
+        return titles.get(self.mode, "SecureMail Client")
+
+    def _shell_subtitle(self) -> str:
+        subtitles = {
+            "client": "Encrypted mailbox",
+            "monitor": "Admin monitor for services, audit logs, warnings, metrics and scenario evidence",
+            "all": "Encrypted mail client, monitoring dashboard, scenario lab",
+        }
+        return subtitles.get(self.mode, subtitles["client"])
+
     def _build_shell(self):
-        header = tk.Frame(self, bg=COLORS["surface"], highlightbackground=COLORS["border"], highlightthickness=1)
+        header = tk.Frame(self, bg=COLORS["header"], highlightbackground=COLORS["border"], highlightthickness=1)
+        self.header = header
         header.pack(side="top", fill="x")
 
-        left_header = tk.Frame(header, bg=COLORS["surface"])
+        left_header = tk.Frame(header, bg=COLORS["header"])
         left_header.pack(side="left", padx=18, pady=12)
-        tk.Label(left_header, text="SecureMail", font=("Segoe UI Semibold", 18),
-                 bg=COLORS["surface"], fg=COLORS["text"]).pack(anchor="w")
-        tk.Label(left_header, text="Encrypted mail client, monitoring dashboard, scenario lab",
-                 bg=COLORS["surface"], fg=COLORS["muted"]).pack(anchor="w")
+        tk.Label(left_header, text="SecureMail", font=("Segoe UI Semibold", 19),
+                 bg=COLORS["header"], fg=COLORS["text"]).pack(anchor="w")
+        tk.Label(left_header, text=self._shell_subtitle(),
+                 bg=COLORS["header"], fg=COLORS["muted"]).pack(anchor="w")
 
-        status_header = tk.Frame(header, bg=COLORS["surface"])
+        status_header = tk.Frame(header, bg=COLORS["header"])
         status_header.pack(side="right", padx=18, pady=10)
         self.user_pill = self._pill(status_header, "Not logged in", "gray")
         self.user_pill.pack(side="left", padx=4)
         self.tgt_pill = self._pill(status_header, "NO TGT", "gray")
         self.tgt_pill.pack(side="left", padx=4)
-        for service in SERVICE_PORTS:
-            pill = self._pill(status_header, f"{service} ?", "gray")
-            pill.pack(side="left", padx=3)
-            self._service_labels[service] = pill
+        if self.mode != "client":
+            for service in SERVICE_PORTS:
+                pill = self._pill(status_header, f"{service} ?", "gray")
+                pill.pack(side="left", padx=3)
+                self._service_labels[service] = pill
 
         body = tk.Frame(self, bg=COLORS["bg"])
+        self.body = body
         body.pack(side="top", fill="both", expand=True)
+        body.grid_columnconfigure(0, weight=0)
         body.grid_columnconfigure(1, weight=1)
+        body.grid_columnconfigure(2, weight=0)
         body.grid_rowconfigure(0, weight=1)
 
         self.nav_shell = tk.Frame(
             body,
-            bg=COLORS["surface"],
-            width=205,
+            bg=COLORS["nav"],
+            width=230 if self.mode == "client" else 245,
             highlightbackground=COLORS["border"],
             highlightthickness=1,
         )
         self.nav_shell.grid(row=0, column=0, sticky="ns")
         self.nav_shell.grid_propagate(False)
-        self.nav_canvas = tk.Canvas(self.nav_shell, bg=COLORS["surface"], highlightthickness=0, borderwidth=0)
+        self.nav_canvas = tk.Canvas(self.nav_shell, bg=COLORS["nav"], highlightthickness=0, borderwidth=0)
         self.nav_canvas.pack(fill="both", expand=True)
-        self.nav = tk.Frame(self.nav_canvas, bg=COLORS["surface"])
+        self.nav = tk.Frame(self.nav_canvas, bg=COLORS["nav"])
         self._nav_window = self.nav_canvas.create_window((0, 0), window=self.nav, anchor="nw")
         self.nav.bind("<Configure>", self._sync_nav_scrollregion)
         self.nav_canvas.bind("<Configure>", self._sync_nav_width)
@@ -206,15 +294,15 @@ class SecureMailApp(tk.Tk):
         self._build_nav()
 
         self.main = tk.Frame(body, bg=COLORS["bg"])
-        self.main.grid(row=0, column=1, sticky="nsew", padx=14, pady=14)
+        self.main.grid(row=0, column=1, sticky="nsew", padx=18, pady=18)
         self.main.grid_columnconfigure(0, weight=1)
         self.main.grid_rowconfigure(1, weight=1)
 
-        self.right = tk.Frame(body, bg=COLORS["surface"], width=310,
-                              highlightbackground=COLORS["border"], highlightthickness=1)
-        self.right.grid(row=0, column=2, sticky="ns")
-        self.right.grid_propagate(False)
-        self.operation_log = self._build_right_panel("Security Flow")
+        self.right: tk.Frame | None = None
+        if self.mode != "client":
+            self.right = tk.Frame(body, bg=COLORS["surface"], width=260,
+                                  highlightbackground=COLORS["border"], highlightthickness=1)
+            self.right.grid_propagate(False)
 
     def _sync_nav_scrollregion(self, _event: tk.Event | None = None):
         self.nav_canvas.configure(scrollregion=self.nav_canvas.bbox("all"))
@@ -245,16 +333,110 @@ class SecureMailApp(tk.Tk):
         for child in parent.winfo_children():
             child.destroy()
 
+        brand = tk.Frame(parent, bg=COLORS["nav"])
+        brand.pack(fill="x", padx=16, pady=(20, 18))
+        logo = tk.Label(
+            brand,
+            text="SM",
+            bg=COLORS["primary"],
+            fg="#FFFFFF",
+            width=4,
+            height=2,
+            font=("Segoe UI Semibold", 10),
+        )
+        logo.pack(anchor="w")
+        mode_title = "SecureMail Client" if self.mode == "client" else ("SecureMail Monitor" if self.mode == "monitor" else "SecureMail")
+        tk.Label(brand, text=mode_title, bg=COLORS["nav"], fg=COLORS["text"],
+                 font=("Segoe UI Semibold", 13)).pack(anchor="w", pady=(10, 2))
+        tk.Label(brand, text=self.state_data.email or "Not signed in", bg=COLORS["nav"], fg=COLORS["muted"],
+                 font=("Segoe UI", 9)).pack(anchor="w")
+
         def section(text: str):
-            tk.Label(parent, text=text.upper(), bg=COLORS["surface"], fg=COLORS["muted"],
+            tk.Label(parent, text=text.upper(), bg=COLORS["nav"], fg=COLORS["subtle"],
                      font=("Segoe UI Semibold", 8)).pack(anchor="w", padx=18, pady=(18, 6))
 
         def nav_button(key: str, text: str, command: Callable[[], None]):
-            btn = ttk.Button(parent, text=text, style="Nav.TButton", command=command)
-            btn.pack(fill="x", padx=12, pady=3)
-            self._nav_buttons[key] = btn
+            active = key == self._active_nav_key
+            bg = COLORS["surface_2"] if active else COLORS["nav"]
+            fg = COLORS["text"] if active else COLORS["muted"]
+            row = tk.Frame(parent, bg=bg, cursor="hand2")
+            row.pack(fill="x", padx=12, pady=3)
+            accent = tk.Frame(row, bg=COLORS["primary"] if active else bg, width=4)
+            accent.pack(side="left", fill="y")
+            label = tk.Label(row, text=text, bg=bg, fg=fg, anchor="w",
+                             font=("Segoe UI Semibold" if active else "Segoe UI", 10), padx=12, pady=11)
+            label.pack(side="left", fill="x", expand=True)
+
+            def on_enter(_event: tk.Event):
+                if key != self._active_nav_key:
+                    row.configure(bg=COLORS["surface"])
+                    accent.configure(bg=COLORS["surface"])
+                    label.configure(bg=COLORS["surface"], fg=COLORS["text"])
+
+            def on_leave(_event: tk.Event):
+                if key != self._active_nav_key:
+                    row.configure(bg=COLORS["nav"])
+                    accent.configure(bg=COLORS["nav"])
+                    label.configure(bg=COLORS["nav"], fg=COLORS["muted"])
+
+            def invoke(_event: tk.Event | None = None):
+                self._active_nav_key = key
+                command()
+
+            for widget in (row, accent, label):
+                widget.bind("<Button-1>", invoke)
+                widget.bind("<Enter>", on_enter)
+                widget.bind("<Leave>", on_leave)
+            self._nav_buttons[key] = row
 
         role = self.state_data.role
+
+        if self.mode == "monitor":
+            section("Services")
+            self._add_service_toggle_button(parent).pack(fill="x", padx=12, pady=3)
+            ttk.Button(parent, text="Refresh services", command=self.refresh_services).pack(fill="x", padx=12, pady=3)
+            ttk.Separator(parent).pack(fill="x", padx=12, pady=18)
+
+            section("Account")
+            if not role:
+                nav_button("login", "Monitor Login", self.show_login)
+                return
+            if role != "admin":
+                nav_button("access", "Monitor Access", self.show_monitor_access_denied)
+                ttk.Separator(parent).pack(fill="x", padx=12, pady=18)
+                ttk.Button(parent, text="Logout", command=self.logout).pack(fill="x", padx=12, pady=3)
+                return
+
+            section("Monitoring")
+            nav_button("monitor", "Dashboard", self.show_monitor)
+
+            section("Administration")
+            nav_button("accounts", "Accounts", self.show_accounts)
+            nav_button("dkim", "DKIM Domains", self.show_dkim_domains)
+
+            section("Scenario Lab")
+            nav_button("scenario", "Scenarios", self.show_scenarios)
+
+            ttk.Separator(parent).pack(fill="x", padx=12, pady=18)
+            ttk.Button(parent, text="Logout", command=self.logout).pack(fill="x", padx=12, pady=3)
+            return
+
+        if self.mode == "client":
+            section("Account")
+            if not role:
+                nav_button("login", "Login / Register", self.show_login)
+                return
+
+            ttk.Button(parent, text="Compose secure mail", style="Primary.TButton",
+                       command=self.show_compose).pack(fill="x", padx=12, pady=(8, 12))
+            section("User App")
+            nav_button("inbox", "Inbox", self.show_inbox)
+            nav_button("sent", "Sent", self.show_sent)
+            nav_button("security", "Security / Recovery", self.show_security)
+
+            ttk.Separator(parent).pack(fill="x", padx=12, pady=18)
+            ttk.Button(parent, text="Logout", command=self.logout).pack(fill="x", padx=12, pady=3)
+            return
 
         section("Services")
         self._add_service_toggle_button(parent).pack(fill="x", padx=12, pady=3)
@@ -277,7 +459,8 @@ class SecureMailApp(tk.Tk):
             section("Monitoring")
             nav_button("monitor", "Dashboard", self.show_monitor)
 
-            section("Domain Security")
+            section("Administration")
+            nav_button("accounts", "Accounts", self.show_accounts)
             nav_button("dkim", "DKIM Domains", self.show_dkim_domains)
 
             section("Scenario Lab")
@@ -286,6 +469,33 @@ class SecureMailApp(tk.Tk):
         ttk.Separator(parent).pack(fill="x", padx=12, pady=18)
         ttk.Button(parent, text="Logout", command=self.logout).pack(fill="x", padx=12, pady=3)
 
+    def _set_client_chrome(self, visible: bool):
+        if self.mode != "client":
+            return
+        if visible:
+            if not self.header.winfo_ismapped():
+                self.header.pack(side="top", fill="x", before=self.body)
+            if not self.nav_shell.winfo_ismapped():
+                self.nav_shell.grid(row=0, column=0, sticky="ns")
+            self.main.grid_configure(row=0, column=1, columnspan=1, sticky="nsew", padx=18, pady=18)
+            self.body.grid_columnconfigure(0, weight=0)
+            self.body.grid_columnconfigure(1, weight=1)
+            self.body.grid_columnconfigure(2, weight=0)
+            return
+        if self.header.winfo_ismapped():
+            self.header.pack_forget()
+        if self.nav_shell.winfo_ismapped():
+            self.nav_shell.grid_remove()
+        self.main.grid_configure(row=0, column=0, columnspan=3, sticky="nsew", padx=0, pady=0)
+        self.body.grid_columnconfigure(0, weight=1)
+        self.body.grid_columnconfigure(1, weight=0)
+        self.body.grid_columnconfigure(2, weight=0)
+
+    def _set_active_nav(self, key: str):
+        self._active_nav_key = key
+        if hasattr(self, "nav"):
+            self._build_nav()
+
     def _add_service_toggle_button(self, parent: tk.Widget) -> ttk.Button:
         btn = ttk.Button(parent, text="Start all services", style="Primary.TButton",
                          command=self.toggle_all_services)
@@ -293,38 +503,71 @@ class SecureMailApp(tk.Tk):
         self._update_service_toggle_buttons()
         return btn
 
-    def _build_right_panel(self, title: str) -> tk.Text:
+    def _build_right_panel(self, title: str) -> tk.Text | None:
+        if self.mode == "client" or self.right is None:
+            return None
+        if not self._detail_panel_visible:
+            return None
         self._clear_right()
-        tk.Label(self.right, text=title, bg=COLORS["surface"], fg=COLORS["text"],
-                 font=("Segoe UI Semibold", 13)).pack(anchor="w", padx=16, pady=(16, 4))
-        tk.Label(self.right, text="Trang thai thao tac va bang chung bao mat",
-                 bg=COLORS["surface"], fg=COLORS["muted"], wraplength=265, justify="left").pack(anchor="w", padx=16)
-        text = tk.Text(self.right, height=18, wrap="word", borderwidth=0, bg="#F8FAFC",
-                       fg=COLORS["text"], padx=10, pady=10, font=("Consolas", 9))
-        text.pack(fill="both", expand=True, padx=16, pady=16)
+        head = tk.Frame(self.right, bg=COLORS["surface"])
+        head.pack(fill="x", padx=14, pady=(14, 4))
+        tk.Label(head, text=title, bg=COLORS["surface"], fg=COLORS["text"],
+                 font=("Segoe UI Semibold", 13)).pack(side="left", anchor="w")
+        ttk.Button(head, text="Hide", command=self._hide_detail_panel).pack(side="right")
+        tk.Label(self.right, text="Operation detail, audit evidence and selected event context",
+                 bg=COLORS["surface"], fg=COLORS["muted"], wraplength=220, justify="left").pack(anchor="w", padx=14)
+        text = tk.Text(self.right, height=18, wrap="word", borderwidth=0, bg=COLORS["input"],
+                       fg=COLORS["text"], insertbackground=COLORS["text"], padx=10, pady=10, font=("Consolas", 9))
+        text.pack(fill="both", expand=True, padx=14, pady=14)
         text.configure(state="disabled")
         self._right_widgets.append(text)
         return text
 
+    def _show_detail_panel(self):
+        if self.mode == "client" or self.right is None:
+            return
+        if not self._detail_panel_visible:
+            self._detail_panel_visible = True
+            self.right.grid(row=0, column=2, sticky="ns")
+
+    def _hide_detail_panel(self):
+        if self.right is None:
+            return
+        self._detail_panel_visible = False
+        self.operation_log = None
+        self._clear_right()
+        self.right.grid_remove()
+
+    def _toggle_detail_panel(self):
+        if self._detail_panel_visible:
+            self._hide_detail_panel()
+        else:
+            self._show_detail_panel()
+            self.operation_log = self._build_right_panel("Monitor Detail")
+
     def _clear_main(self):
         for child in self.main.winfo_children():
             child.destroy()
+        for row in range(6):
+            self.main.grid_rowconfigure(row, weight=0)
         self.main.grid_rowconfigure(1, weight=1)
-        self.main.grid_rowconfigure(2, weight=1)
 
     def _clear_right(self):
+        if self.right is None:
+            self._right_widgets.clear()
+            return
         for child in self.right.winfo_children():
             child.destroy()
         self._right_widgets.clear()
 
     def _page_title(self, title: str, subtitle: str = ""):
         top = tk.Frame(self.main, bg=COLORS["bg"])
-        top.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        top.grid(row=0, column=0, sticky="ew", pady=(0, 16))
         tk.Label(top, text=title, bg=COLORS["bg"], fg=COLORS["text"],
-                 font=("Segoe UI Semibold", 20)).pack(anchor="w")
+                 font=("Segoe UI Semibold", 22)).pack(anchor="w")
         if subtitle:
             tk.Label(top, text=subtitle, bg=COLORS["bg"], fg=COLORS["muted"],
-                     wraplength=780, justify="left").pack(anchor="w", pady=(2, 0))
+                     wraplength=850, justify="left", font=("Segoe UI", 10)).pack(anchor="w", pady=(4, 0))
 
     def _surface(self, parent: tk.Widget | None = None) -> tk.Frame:
         parent = parent or self.main
@@ -346,6 +589,9 @@ class SecureMailApp(tk.Tk):
 
     def _append_log(self, line: str):
         ts = dt.datetime.now().strftime("%H:%M:%S")
+        self._log_history.append(f"[{ts}] {line}")
+        if self.operation_log is None:
+            return
         self.operation_log.configure(state="normal")
         self.operation_log.insert("end", f"[{ts}] {line}\n")
         self.operation_log.see("end")
@@ -412,7 +658,13 @@ class SecureMailApp(tk.Tk):
                     if label in {"Start all services", "Stop all services"}:
                         self._set_service_controls_busy(False)
                         self.refresh_services()
-                    self._show_error(message, tb or "")
+                    if label == "Send secure mail":
+                        self._set_compose_busy(False, "Failed")
+                    if self.mode == "client" and label in {"Login", "Register identity"}:
+                        self._set_auth_error(message)
+                        continue
+                    detail = "" if label == "Login" else (tb or "")
+                    self._show_error(message, detail)
         finally:
             with contextlib.suppress(tk.TclError):
                 self.after(150, self._drain_task_queue)
@@ -432,10 +684,19 @@ class SecureMailApp(tk.Tk):
             self.state_data.ctx = ctx
             self._append_log(f"Loaded saved session for {ctx['email']}")
         self._set_header_user()
-        if self.state_data.ctx:
-            self.show_inbox()
-        else:
+        self._show_default_page()
+
+    def _show_default_page(self):
+        if not self.state_data.ctx:
             self.show_login()
+            return
+        if self.mode == "monitor":
+            if self.state_data.role == "admin":
+                self.show_monitor()
+            else:
+                self.show_monitor_access_denied()
+            return
+        self.show_inbox()
 
     def logout(self):
         self.state_data.ctx = None
@@ -451,58 +712,257 @@ class SecureMailApp(tk.Tk):
     # ------------------------------------------------------------------
     # Login / Register
     # ------------------------------------------------------------------
+    def show_monitor_access_denied(self):
+        self._set_active_nav("access")
+        self._clear_main()
+        self.operation_log = self._build_right_panel("Monitor Access")
+        self._page_title("Monitor Access", "Dang nhap bang tai khoan admin de quan tri service, audit va alert.")
+
+        card = self._surface()
+        card.grid(row=1, column=0, sticky="ew")
+        inner = tk.Frame(card, bg=COLORS["surface"])
+        inner.pack(fill="x", padx=18, pady=18)
+        tk.Label(inner, text="Admin session required", bg=COLORS["surface"], fg=COLORS["danger"],
+                 font=("Segoe UI Semibold", 14)).pack(anchor="w")
+        tk.Label(
+            inner,
+            text="Tai khoan hien tai khong co role admin. Logout roi login bang admin@mail.local hoac admin duoc cap.",
+            bg=COLORS["surface"],
+            fg=COLORS["muted"],
+            wraplength=760,
+            justify="left",
+        ).pack(anchor="w", pady=(6, 0))
+        self._append_log("Monitor mode requires role=admin.")
+
     def show_login(self):
+        self._set_active_nav("login")
         self._clear_main()
         self.operation_log = self._build_right_panel("Authentication Flow")
-        self._page_title("Login / Register", "Dang nhap Kerberos-lite hoac tao identity PKI moi.")
+        if self.mode == "monitor":
+            self._set_client_chrome(True)
+            self._page_title("Monitor Login", "Admin console for service control, audit and incident evidence.")
+        else:
+            self._set_client_chrome(False)
 
         wrapper = tk.Frame(self.main, bg=COLORS["bg"])
-        wrapper.grid(row=1, column=0, sticky="nsew")
-        wrapper.grid_columnconfigure(0, weight=1)
-        wrapper.grid_columnconfigure(1, weight=1)
 
-        login_card = self._surface(wrapper)
-        login_card.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        login_card.grid_columnconfigure(0, weight=1)
-        login_inner = tk.Frame(login_card, bg=COLORS["surface"])
-        login_inner.pack(fill="both", expand=True, padx=18, pady=18)
-        tk.Label(login_inner, text="Login", bg=COLORS["surface"], fg=COLORS["text"],
-                 font=("Segoe UI Semibold", 14)).pack(anchor="w")
-        email_entry = self._field(login_inner, "Email")
-        email_entry.insert(0, "alice@mail.local")
-        password_entry = self._field(login_inner, "Password", show="*")
-        remember = tk.BooleanVar(value=True)
-        ttk.Checkbutton(login_inner, text="Remember session", variable=remember).pack(anchor="w", pady=10)
-        ttk.Button(login_inner, text="Login", style="Primary.TButton",
-                   command=lambda: self._login(email_entry.get().strip(), password_entry.get(), remember.get())).pack(anchor="w")
+        if self.mode == "monitor":
+            wrapper.grid(row=1, column=0, sticky="nsew")
+            self._build_monitor_login(wrapper)
+            self._append_log("1. Login bang admin de mo Monitor Dashboard")
+            self._append_log("2. Monitor co quyen start/stop services, xem log, warning, audit")
+            self._append_log("3. Neu admin chua ton tai, bam Bootstrap demo data de tao admin@mail.local")
+            return
 
-        register_card = self._surface(wrapper)
-        register_card.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
-        register_inner = tk.Frame(register_card, bg=COLORS["surface"])
-        register_inner.pack(fill="both", expand=True, padx=18, pady=18)
-        tk.Label(register_inner, text="Register Account", bg=COLORS["surface"], fg=COLORS["text"],
-                 font=("Segoe UI Semibold", 14)).pack(anchor="w")
-        name_entry = self._field(register_inner, "Display name")
-        reg_email_entry = self._field(register_inner, "Email")
-        reg_email_entry.insert(0, "carol@mail.local")
-        reg_password_entry = self._field(register_inner, "Password", show="*")
-        reg_confirm_entry = self._field(register_inner, "Confirm password", show="*")
-        ttk.Button(register_inner, text="Generate keypair + Register", style="Primary.TButton",
-                   command=lambda: self._register_account(
-                       reg_email_entry.get().strip(),
-                       reg_password_entry.get(),
-                       reg_confirm_entry.get(),
-                       name_entry.get().strip(),
-                   )).pack(anchor="w", pady=14)
-
+        for row in range(6):
+            self.main.grid_rowconfigure(row, weight=0)
+        self.main.grid_rowconfigure(0, weight=1)
+        wrapper.grid(row=0, column=0, sticky="nsew")
+        self._build_client_login(wrapper)
         self._append_log("1. Doc private key local / tao keypair khi register")
         self._append_log("2. AS-REQ/AS-REP de lay TGT khi login")
         self._append_log("3. Session san sang cho SMTP/POP3 service ticket")
 
+    def _build_client_login(self, parent: tk.Widget):
+        parent.configure(bg=COLORS["auth_bg"])
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_columnconfigure(1, weight=0)
+        parent.grid_columnconfigure(2, weight=1)
+        parent.grid_rowconfigure(0, weight=1)
+        parent.grid_rowconfigure(1, weight=0)
+        parent.grid_rowconfigure(2, weight=1)
+
+        auth_card = tk.Frame(
+            parent,
+            bg=COLORS["surface"],
+            width=460,
+            height=660 if self._client_auth_view == "register" else 545,
+            highlightbackground=COLORS["border"],
+            highlightthickness=1,
+        )
+        auth_card.grid(row=1, column=1, sticky="n", pady=30)
+        auth_card.grid_propagate(False)
+        tk.Frame(auth_card, bg=COLORS["primary"], height=4).pack(fill="x", side="top")
+        auth_inner = tk.Frame(auth_card, bg=COLORS["surface"])
+        auth_inner.pack(fill="both", expand=True, padx=34, pady=(28, 32))
+
+        mark = tk.Label(
+            auth_inner,
+            text="SM",
+            bg=COLORS["primary"],
+            fg="#FFFFFF",
+            width=4,
+            height=2,
+            font=("Segoe UI Semibold", 10),
+        )
+        mark.pack(anchor="center", pady=(0, 12))
+        tk.Label(auth_inner, text="SecureMail", bg=COLORS["surface"], fg=COLORS["text"],
+                 font=("Segoe UI Semibold", 24)).pack(anchor="center")
+        tk.Label(
+            auth_inner,
+            text="Encrypted internal mail client",
+            bg=COLORS["surface"],
+            fg=COLORS["muted"],
+            font=("Segoe UI", 10),
+        ).pack(anchor="center", pady=(2, 22))
+
+        self._auth_error_label = tk.Label(
+            auth_inner,
+            text=self._auth_error_message or " ",
+            bg="#2B1620" if self._auth_error_message else COLORS["surface"],
+            fg="#FDA4AF" if self._auth_error_message else COLORS["surface"],
+            wraplength=370,
+            justify="left",
+            anchor="w",
+            padx=10,
+            pady=8 if self._auth_error_message else 0,
+            font=("Segoe UI", 9),
+        )
+        self._auth_error_label.pack(fill="x", pady=(0, 14 if self._auth_error_message else 2))
+
+        if self._client_auth_view == "register":
+            self._build_register_form(auth_inner)
+        else:
+            self._build_login_form(auth_inner)
+
+    def _build_login_form(self, parent: tk.Widget):
+        tk.Label(parent, text="Welcome back", bg=COLORS["surface"], fg=COLORS["text"],
+                 font=("Segoe UI Semibold", 22)).pack(anchor="w")
+        tk.Label(parent, text="Sign in to open your encrypted mailbox.",
+                 bg=COLORS["surface"], fg=COLORS["muted"], wraplength=360, justify="left").pack(anchor="w", pady=(4, 18))
+        email_entry = self._field(parent, "Email")
+        email_entry.insert(0, "alice@mail.local")
+        password_entry = self._field(parent, "Password", show="*")
+        remember = tk.BooleanVar(value=True)
+        ttk.Checkbutton(parent, text="Remember session", variable=remember).pack(anchor="w", pady=(12, 14))
+        self._web_button(
+            parent,
+            "Open mailbox",
+            lambda: self._login(email_entry.get().strip(), password_entry.get(), remember.get()),
+        ).pack(fill="x")
+        footer = tk.Frame(parent, bg=COLORS["surface"])
+        footer.pack(fill="x", pady=(18, 0))
+        tk.Label(footer, text="New to SecureMail?", bg=COLORS["surface"], fg=COLORS["muted"]).pack(side="left")
+        self._link_label(footer, "Create account", lambda: self._switch_client_auth("register")).pack(side="left", padx=(6, 0))
+
+    def _build_register_form(self, parent: tk.Widget):
+        tk.Label(parent, text="Create account", bg=COLORS["surface"], fg=COLORS["text"],
+                 font=("Segoe UI Semibold", 22)).pack(anchor="w")
+        tk.Label(parent, text="Public registration creates a normal user identity with local keypair and CA-signed certificate.",
+                 bg=COLORS["surface"], fg=COLORS["muted"], wraplength=380, justify="left").pack(anchor="w", pady=(4, 14))
+        name_entry = self._field(parent, "Display name")
+        reg_email_entry = self._field(parent, "Email")
+        reg_email_entry.insert(0, "carol@mail.local")
+        reg_password_entry = self._field(parent, "Password", show="*")
+        reg_confirm_entry = self._field(parent, "Confirm password", show="*")
+        self._web_button(
+            parent,
+            "Generate identity",
+            lambda: self._register_account(
+                reg_email_entry.get().strip(),
+                reg_password_entry.get(),
+                reg_confirm_entry.get(),
+                name_entry.get().strip(),
+            ),
+        ).pack(fill="x", pady=(16, 0))
+        footer = tk.Frame(parent, bg=COLORS["surface"])
+        footer.pack(fill="x", pady=(18, 0))
+        tk.Label(footer, text="Already have an account?", bg=COLORS["surface"], fg=COLORS["muted"]).pack(side="left")
+        self._link_label(footer, "Sign in", lambda: self._switch_client_auth("login")).pack(side="left", padx=(6, 0))
+
+    def _switch_client_auth(self, view: str):
+        self._client_auth_view = view
+        self._set_auth_error("")
+        self.show_login()
+
+    def _set_auth_error(self, message: str):
+        self._auth_error_message = message
+        label = self._auth_error_label
+        if label is None:
+            return
+        if message:
+            label.configure(text=message, bg="#2B1620", fg="#FDA4AF", pady=8)
+        else:
+            label.configure(text=" ", bg=COLORS["surface"], fg=COLORS["surface"], pady=0)
+
+    def _web_button(self, parent: tk.Widget, text: str, command: Callable[[], None], tone: str = "primary") -> tk.Frame:
+        base = COLORS["primary"] if tone == "primary" else COLORS["surface_2"]
+        hover = "#4768EE" if tone == "primary" else COLORS["surface_3"]
+        frame = tk.Frame(parent, bg=base, cursor="hand2")
+        label = tk.Label(frame, text=text, bg=base, fg="#FFFFFF" if tone == "primary" else COLORS["text"],
+                         font=("Segoe UI Semibold", 10), padx=14, pady=11, cursor="hand2")
+        label.pack(fill="x")
+
+        def enter(_event: tk.Event):
+            frame.configure(bg=hover)
+            label.configure(bg=hover)
+
+        def leave(_event: tk.Event):
+            frame.configure(bg=base)
+            label.configure(bg=base)
+
+        def invoke(_event: tk.Event | None = None):
+            command()
+
+        for widget in (frame, label):
+            widget.bind("<Enter>", enter)
+            widget.bind("<Leave>", leave)
+            widget.bind("<Button-1>", invoke)
+        return frame
+
+    def _link_label(self, parent: tk.Widget, text: str, command: Callable[[], None]) -> tk.Label:
+        label = tk.Label(parent, text=text, bg=COLORS["surface"], fg=COLORS["primary"],
+                         font=("Segoe UI Semibold", 10), cursor="hand2")
+
+        def enter(_event: tk.Event):
+            label.configure(fg=COLORS["info"])
+
+        def leave(_event: tk.Event):
+            label.configure(fg=COLORS["primary"])
+
+        label.bind("<Enter>", enter)
+        label.bind("<Leave>", leave)
+        label.bind("<Button-1>", lambda _event: command())
+        return label
+
+    def _build_monitor_login(self, parent: tk.Widget):
+        parent.grid_columnconfigure(0, weight=1)
+        card = self._surface(parent)
+        card.grid(row=0, column=0, sticky="nsew")
+        inner = tk.Frame(card, bg=COLORS["surface"])
+        inner.pack(fill="both", expand=True, padx=24, pady=24)
+        tk.Label(inner, text="Administrator access", bg=COLORS["surface"], fg=COLORS["text"],
+                 font=("Segoe UI Semibold", 18)).pack(anchor="w")
+        tk.Label(inner, text="Use the monitor to operate services, inspect audit trails and collect scenario evidence.",
+                 bg=COLORS["surface"], fg=COLORS["muted"], wraplength=680, justify="left").pack(anchor="w", pady=(4, 14))
+        email_entry = self._field(inner, "Admin email")
+        email_entry.insert(0, "admin@mail.local")
+        password_entry = self._field(inner, "Password", show="*")
+        password_entry.insert(0, "admin-pw")
+        tk.Label(
+            inner,
+            text="Demo admin: admin@mail.local / admin-pw",
+            bg=COLORS["surface"],
+            fg=COLORS["muted"],
+            font=("Segoe UI", 9),
+        ).pack(anchor="w", pady=(8, 0))
+        remember = tk.BooleanVar(value=True)
+        ttk.Checkbutton(inner, text="Remember admin session", variable=remember).pack(anchor="w", pady=10)
+        actions = tk.Frame(inner, bg=COLORS["surface"])
+        actions.pack(fill="x")
+        ttk.Button(actions, text="Open Monitor", style="Primary.TButton",
+                   command=lambda: self._login(email_entry.get().strip(), password_entry.get(), remember.get())).pack(side="left")
+        ttk.Button(actions, text="Bootstrap demo data",
+                   command=lambda: self._run_scenario_cmd("bootstrap")).pack(side="left", padx=10)
+
     def _login(self, email: str, password: str, remember: bool):
         if not email or not password:
-            messagebox.showwarning("SecureMail", "Nhap email va password.")
+            if self.mode == "client":
+                self._set_auth_error("Enter both email and password.")
+            else:
+                messagebox.showwarning("SecureMail", "Nhap email va password.")
             return
+        self._set_auth_error("")
 
         def action():
             ctx = client_core.login(email, password)
@@ -511,27 +971,42 @@ class SecureMailApp(tk.Tk):
             return ctx
 
         def done(ctx: dict[str, Any]):
+            self._set_auth_error("")
             self.state_data.ctx = ctx
             self._set_header_user()
             self._append_log(f"TGT length={len(ctx['tgt'])}; current user={ctx['email']}")
-            self.show_inbox()
+            self._show_default_page()
 
         self._run_task("Login", action, done)
 
     def _register_account(self, email: str, password: str, confirm_password: str, display_name: str):
+        email = email.strip().lower()
         if not email or not password:
-            messagebox.showwarning("SecureMail", "Nhap email va password de register.")
+            self._set_auth_error("Enter email and password to create your identity.")
+            return
+        if not is_valid_email(email):
+            self._set_auth_error("Email is not valid. Example: carol@mail.local")
+            return
+        if len(password) < 6:
+            self._set_auth_error("Password must be at least 6 characters.")
             return
         if password != confirm_password:
-            messagebox.showwarning("SecureMail", "Password va confirm password khong khop.")
+            self._set_auth_error("Password and confirm password do not match.")
             return
+        if client_core.account_exists(email):
+            self._set_auth_error(f"Account already exists: {email}")
+            return
+        self._set_auth_error("")
 
         def action():
             return client_core.public_register(email, password, display_name)
 
         def done(result: dict[str, Any]):
+            self._set_auth_error("")
             self._append_log(f"Registered {email}; serial={result.get('serial')}")
-            messagebox.showinfo("SecureMail", f"Registered {email}\nSerial: {result.get('serial')}")
+            messagebox.showinfo("SecureMail", f"Registered {email}\nSerial: {result.get('serial')}\nBan co the dang nhap ngay.")
+            self._client_auth_view = "login"
+            self.show_login()
 
         self._run_task("Register identity", action, done)
 
@@ -549,44 +1024,68 @@ class SecureMailApp(tk.Tk):
         self._show_mailbox("sent")
 
     def _show_mailbox(self, folder: str):
+        self._set_client_chrome(True)
+        self._set_active_nav("inbox" if folder == "inbox" else "sent")
         self._clear_main()
         self.operation_log = self._build_right_panel("Message Security")
         title = "Inbox" if folder == "inbox" else "Sent"
-        subtitle = "Fetch POP3, decrypt S/MIME, verify signature va policy labels."
+        subtitle = f"{self.state_data.email or ''} - signed, encrypted and policy-checked mail"
         self._page_title(title, subtitle)
         self.state_data.current_folder = folder
+        self.main.grid_rowconfigure(1, weight=0)
+        self.main.grid_rowconfigure(2, weight=0)
+        self.main.grid_rowconfigure(3, weight=1)
+
+        stats = tk.Frame(self.main, bg=COLORS["bg"])
+        stats.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        self._build_mail_stats(stats, folder)
 
         toolbar = tk.Frame(self.main, bg=COLORS["bg"])
-        toolbar.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        toolbar.grid(row=2, column=0, sticky="ew", pady=(0, 12))
+        toolbar.grid_columnconfigure(1, weight=1)
+        tk.Label(toolbar, text="Search", bg=COLORS["bg"], fg=COLORS["muted"]).grid(row=0, column=0, sticky="w", padx=(0, 8))
         search_var = tk.StringVar()
-        ttk.Entry(toolbar, textvariable=search_var).pack(side="left", fill="x", expand=True, ipady=5)
+        search_entry = ttk.Entry(toolbar, textvariable=search_var)
+        search_entry.grid(row=0, column=1, sticky="ew", ipady=6)
         filter_var = tk.StringVar(value="All")
         ttk.Combobox(toolbar, textvariable=filter_var,
                      values=("All", "Secure", "Warning", "Dangerous", "Signed", "Failed", "Quarantine"),
-                     state="readonly", width=16).pack(side="left", padx=8)
+                     state="readonly", width=16).grid(row=0, column=2, padx=10, ipady=4)
         ttk.Button(toolbar, text="Refresh", style="Primary.TButton",
-                   command=lambda: self.refresh_mailbox(folder, tree, search_var.get(), filter_var.get())).pack(side="left")
+                   command=lambda: self.refresh_mailbox(folder, tree, search_var.get(), filter_var.get())).grid(row=0, column=3)
+        if folder == "inbox":
+            ttk.Button(toolbar, text="Compose", style="Secondary.TButton",
+                       command=self.show_compose).grid(row=0, column=4, padx=(10, 0))
 
         table_frame = self._surface()
-        table_frame.grid(row=2, column=0, sticky="nsew")
-        table_frame.grid_rowconfigure(0, weight=1)
+        table_frame.grid(row=3, column=0, sticky="nsew")
+        table_frame.grid_rowconfigure(1, weight=1)
         table_frame.grid_columnconfigure(0, weight=1)
-        columns = ("id", "status", "from_to", "subject", "date", "spf", "dkim", "dmarc")
+        table_head = tk.Frame(table_frame, bg=COLORS["surface"])
+        table_head.grid(row=0, column=0, columnspan=2, sticky="ew", padx=12, pady=(12, 4))
+        table_head.grid_columnconfigure(0, weight=1)
+        tk.Label(table_head, text="Messages", bg=COLORS["surface"], fg=COLORS["text"],
+                 font=("Segoe UI Semibold", 12)).grid(row=0, column=0, sticky="w")
+        tk.Label(table_head, text="Open a row to inspect signature and policy details.",
+                 bg=COLORS["surface"], fg=COLORS["muted"]).grid(row=1, column=0, sticky="w", pady=(2, 0))
+        columns = ("from_to", "subject", "date", "security")
         tree = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="browse")
         headings = {
-            "id": "ID", "status": "Status", "from_to": "From" if folder == "inbox" else "To",
-            "subject": "Subject", "date": "Date", "spf": "SPF", "dkim": "DKIM", "dmarc": "DMARC",
+            "from_to": "Nguoi gui" if folder == "inbox" else "Nguoi nhan",
+            "subject": "Tieu de",
+            "date": "Thoi gian",
+            "security": "Bao mat",
         }
-        widths = {"id": 55, "status": 105, "from_to": 190, "subject": 320, "date": 190, "spf": 70, "dkim": 70, "dmarc": 90}
+        widths = {"from_to": 230, "subject": 420, "date": 210, "security": 220}
         for col in columns:
             tree.heading(col, text=headings[col])
             tree.column(col, width=widths[col], anchor="w")
         tree.tag_configure("SECURE", foreground=COLORS["success"])
         tree.tag_configure("WARNING", foreground=COLORS["warning"])
         tree.tag_configure("DANGEROUS", foreground=COLORS["danger"])
-        tree.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        tree.grid(row=1, column=0, sticky="nsew", padx=10, pady=(6, 10))
         scroll = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
-        scroll.grid(row=0, column=1, sticky="ns", pady=10)
+        scroll.grid(row=1, column=1, sticky="ns", pady=(6, 10))
         tree.configure(yscrollcommand=scroll.set)
         tree.bind("<<TreeviewSelect>>", lambda _evt: self._on_mail_select(tree))
 
@@ -634,14 +1133,52 @@ class SecureMailApp(tk.Tk):
                 self._append_log(f"Loaded {len(messages)} {folder} message(s); view closed")
                 return
             self._populate_mail_tree(tree, folder, search, filter_name)
+            self._update_mail_stats(folder)
             self._append_log(f"Loaded {len(messages)} {folder} message(s)")
 
         self._run_task(f"Refresh {folder}", action, done)
+
+    def _build_mail_stats(self, parent: tk.Widget, folder: str):
+        self._mail_stat_labels = {}
+        for i, (key, title, tone) in enumerate((
+            ("total", "Total", "info"),
+            ("secure", "Secure", "success"),
+            ("warning", "Warning", "warning"),
+            ("dangerous", "Dangerous", "danger"),
+        )):
+            card = tk.Frame(parent, bg=COLORS["surface_2"], highlightbackground=COLORS["border"], highlightthickness=1)
+            card.grid(row=0, column=i, sticky="ew", padx=(0 if i == 0 else 10, 0))
+            parent.grid_columnconfigure(i, weight=1)
+            tk.Label(card, text=title, bg=COLORS["surface_2"], fg=COLORS["muted"],
+                     font=("Segoe UI Semibold", 8)).pack(anchor="w", padx=12, pady=(10, 0))
+            value = tk.Label(card, text="0", bg=COLORS["surface_2"], fg=COLORS[tone],
+                             font=("Segoe UI Semibold", 18))
+            value.pack(anchor="w", padx=12, pady=(0, 10))
+            self._mail_stat_labels[key] = value
+        self._update_mail_stats(folder)
+
+    def _update_mail_stats(self, folder: str):
+        if not self._mail_stat_labels:
+            return
+        messages = self.state_data.inbox if folder == "inbox" else self.state_data.sent
+        counts = {"total": len(messages), "secure": 0, "warning": 0, "dangerous": 0}
+        for msg in messages:
+            label, _reason = client_core.classify_security(msg)
+            if label == "SECURE":
+                counts["secure"] += 1
+            elif label == "WARNING":
+                counts["warning"] += 1
+            elif label == "DANGEROUS":
+                counts["dangerous"] += 1
+        for key, value in counts.items():
+            if key in self._mail_stat_labels:
+                self._mail_stat_labels[key].configure(text=str(value))
 
     def _populate_mail_tree(self, tree: ttk.Treeview, folder: str, search: str, filter_name: str):
         messages = self.state_data.inbox if folder == "inbox" else self.state_data.sent
         query = search.lower().strip()
         tree.delete(*tree.get_children())
+        inserted = 0
         for msg in messages:
             label, _reason = client_core.classify_security(msg)
             if not self._mail_matches_filter(msg, label, filter_name):
@@ -651,15 +1188,24 @@ class SecureMailApp(tk.Tk):
                 continue
             from_to = msg.get("sender") if folder == "inbox" else (msg.get("to") or msg.get("recipient"))
             tree.insert("", "end", iid=str(msg["id"]), values=(
-                msg.get("id", ""),
-                label,
                 from_to or "",
                 msg.get("subject", ""),
                 msg.get("date", ""),
-                msg.get("spf_result", ""),
-                msg.get("dkim_result", ""),
-                msg.get("dmarc_action", ""),
+                self._security_summary(msg, label),
             ), tags=(label,))
+            inserted += 1
+        if inserted == 0:
+            tree.insert("", "end", iid="empty", values=(
+                "No messages",
+                "Try refresh, change filter, or compose a new secure mail.",
+                "",
+                "",
+            ))
+
+    def _security_summary(self, msg: dict[str, Any], label: str) -> str:
+        signature = "signed" if msg.get("signature_valid") else "signature issue"
+        dmarc = msg.get("dmarc_action") or "policy n/a"
+        return f"{label} - {signature}, {dmarc}"
 
     def _mail_matches_filter(self, msg: dict[str, Any], label: str, filter_name: str) -> bool:
         if filter_name == "All":
@@ -678,7 +1224,10 @@ class SecureMailApp(tk.Tk):
         selected = tree.selection()
         if not selected:
             return
-        msg_id = int(selected[0])
+        try:
+            msg_id = int(selected[0])
+        except ValueError:
+            return
         messages = self.state_data.inbox if self.state_data.current_folder == "inbox" else self.state_data.sent
         msg = next((m for m in messages if int(m.get("id", -1)) == msg_id), None)
         if msg:
@@ -694,23 +1243,74 @@ class SecureMailApp(tk.Tk):
         self._append_log(f"SPF={msg.get('spf_result')} DKIM={msg.get('dkim_result')} DMARC={msg.get('dmarc_action')}")
 
         detail = tk.Toplevel(self)
-        detail.title(f"Message #{msg.get('id')} - {label}")
-        detail.geometry("760x620")
+        detail.title(f"{msg.get('subject', 'Message')} - {label}")
+        detail.geometry("860x660")
+        detail.minsize(760, 560)
+        detail.transient(self)
         detail.configure(bg=COLORS["bg"])
-        top = tk.Frame(detail, bg=COLORS["surface"], highlightbackground=COLORS["border"], highlightthickness=1)
-        top.pack(fill="x", padx=12, pady=12)
-        for line in (
-            f"From: {msg.get('sender', '')}",
-            f"To: {msg.get('to') or msg.get('recipient', '')}",
-            f"Subject: {msg.get('subject', '')}",
-            f"Date: {msg.get('date', '')}",
-            f"Security: {label} - {reason}",
-            f"SPF: {msg.get('spf_result', '')} | DKIM: {msg.get('dkim_result', '')} | DMARC: {msg.get('dmarc_action', '')}",
+        shell = tk.Frame(detail, bg=COLORS["bg"])
+        shell.pack(fill="both", expand=True, padx=18, pady=18)
+        shell.grid_columnconfigure(0, weight=1)
+        shell.grid_rowconfigure(1, weight=1)
+
+        top = tk.Frame(shell, bg=COLORS["surface"], highlightbackground=COLORS["border"], highlightthickness=1)
+        top.grid(row=0, column=0, sticky="ew")
+        top.grid_columnconfigure(0, weight=1)
+        tk.Label(top, text=msg.get("subject", "(no subject)"), bg=COLORS["surface"], fg=COLORS["text"],
+                 font=("Segoe UI Semibold", 18), wraplength=760, justify="left").grid(
+            row=0, column=0, sticky="w", padx=18, pady=(16, 4)
+        )
+        meta = tk.Frame(top, bg=COLORS["surface"])
+        meta.grid(row=1, column=0, sticky="ew", padx=18, pady=(4, 12))
+        meta.grid_columnconfigure(1, weight=1)
+        for row, (name, value) in enumerate((
+            ("From", msg.get("sender", "")),
+            ("To", msg.get("to") or msg.get("recipient", "")),
+            ("Date", msg.get("date", "")),
+        )):
+            tk.Label(meta, text=name, bg=COLORS["surface"], fg=COLORS["subtle"], width=8,
+                     anchor="w").grid(row=row, column=0, sticky="w", pady=2)
+            tk.Label(meta, text=value, bg=COLORS["surface"], fg=COLORS["text"],
+                     anchor="w", wraplength=680, justify="left").grid(row=row, column=1, sticky="ew", pady=2)
+
+        chips = tk.Frame(top, bg=COLORS["surface"])
+        chips.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 16))
+        security_tone = "success" if label == "SECURE" else ("warning" if label == "WARNING" else "danger")
+        self._pill(chips, label, security_tone).pack(side="left", padx=(0, 6))
+        for chip in (
+            f"SPF {msg.get('spf_result') or 'n/a'}",
+            f"DKIM {msg.get('dkim_result') or 'n/a'}",
+            f"DMARC {msg.get('dmarc_action') or 'n/a'}",
         ):
-            tk.Label(top, text=line, bg=COLORS["surface"], fg=COLORS["text"], anchor="w",
-                     wraplength=700, justify="left").pack(fill="x", padx=12, pady=2)
-        body = tk.Text(detail, wrap="word", bg=COLORS["surface"], fg=COLORS["text"], padx=12, pady=12)
-        body.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+            self._pill(chips, chip, "gray").pack(side="left", padx=(0, 6))
+        tk.Label(chips, text=reason, bg=COLORS["surface"], fg=COLORS["muted"],
+                 wraplength=360, justify="left").pack(side="left", padx=(8, 0))
+
+        body_shell = tk.Frame(shell, bg=COLORS["surface"], highlightbackground=COLORS["border"], highlightthickness=1)
+        body_shell.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
+        body_shell.grid_columnconfigure(0, weight=1)
+        body_shell.grid_rowconfigure(1, weight=1)
+        if msg.get("error"):
+            tk.Label(body_shell, text=msg.get("error"), bg="#2B1620", fg="#FDA4AF",
+                     anchor="w", wraplength=780, justify="left", padx=12, pady=10).grid(
+                row=0, column=0, sticky="ew", padx=12, pady=(12, 0)
+            )
+        else:
+            tk.Label(body_shell, text="Message body", bg=COLORS["surface"], fg=COLORS["muted"]).grid(
+                row=0, column=0, sticky="w", padx=12, pady=(12, 0)
+            )
+        body = tk.Text(
+            body_shell,
+            wrap="word",
+            bg=COLORS["input"],
+            fg=COLORS["text"],
+            insertbackground=COLORS["text"],
+            padx=16,
+            pady=16,
+            borderwidth=0,
+            font=("Segoe UI", 10),
+        )
+        body.grid(row=1, column=0, sticky="nsew", padx=12, pady=12)
         body.insert("1.0", msg.get("error") or msg.get("body", ""))
         body.configure(state="disabled")
 
@@ -720,38 +1320,85 @@ class SecureMailApp(tk.Tk):
     def show_compose(self):
         if not self._require_login():
             return
+        self._set_client_chrome(True)
+        self._set_active_nav("compose")
         self._clear_main()
+        self._compose_send_button = None
+        self._compose_status_label = None
         self.operation_log = self._build_right_panel("Send Security Flow")
-        self._page_title("Compose", "Gui email ma hoa dau-cuoi va ky so RSA-PSS.")
+        self._page_title("Compose", f"From {self.state_data.email or ''} - encrypted and signed delivery")
 
         card = self._surface()
         card.grid(row=1, column=0, sticky="nsew")
         card.grid_columnconfigure(0, weight=1)
-        card.grid_rowconfigure(4, weight=1)
+        card.grid_rowconfigure(0, weight=1)
         inner = tk.Frame(card, bg=COLORS["surface"])
-        inner.grid(row=0, column=0, sticky="nsew", padx=18, pady=18)
+        inner.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
         inner.grid_columnconfigure(0, weight=1)
-        inner.grid_rowconfigure(6, weight=1)
+        inner.grid_rowconfigure(3, weight=1)
 
-        to_entry = self._field(inner, "To")
+        head = tk.Frame(inner, bg=COLORS["surface"])
+        head.grid(row=0, column=0, sticky="ew", padx=22, pady=(18, 12))
+        head.grid_columnconfigure(0, weight=1)
+        tk.Label(head, text="New secure message", bg=COLORS["surface"], fg=COLORS["text"],
+                 font=("Segoe UI Semibold", 16)).grid(row=0, column=0, sticky="w")
+        tk.Label(head, text="Recipient certs are checked before delivery.",
+                 bg=COLORS["surface"], fg=COLORS["muted"]).grid(row=1, column=0, sticky="w", pady=(3, 0))
+        self._compose_status_label = self._pill(head, "Ready", "gray")
+        self._compose_status_label.grid(row=0, column=1, rowspan=2, sticky="e")
+
+        tk.Frame(inner, bg=COLORS["border"], height=1).grid(row=1, column=0, sticky="ew")
+
+        form = tk.Frame(inner, bg=COLORS["surface"])
+        form.grid(row=2, column=0, sticky="ew", padx=22, pady=(14, 0))
+        form.grid_columnconfigure(0, weight=1)
+
+        to_entry = self._field(form, "To")
         to_entry.insert(0, "bob@mail.local")
-        subject_entry = self._field(inner, "Subject")
+        subject_entry = self._field(form, "Subject")
         subject_entry.insert(0, "SecureMail test")
-        tk.Label(inner, text="Body", bg=COLORS["surface"], fg=COLORS["muted"]).pack(anchor="w")
-        body = tk.Text(inner, height=16, wrap="word", bg="#F8FAFC", fg=COLORS["text"], padx=10, pady=10,
-                       font=("Segoe UI", 10))
-        body.pack(fill="both", expand=True, pady=(3, 12))
+
+        editor = tk.Frame(inner, bg=COLORS["surface"])
+        editor.grid(row=3, column=0, sticky="nsew", padx=22, pady=(8, 0))
+        editor.grid_columnconfigure(0, weight=1)
+        editor.grid_rowconfigure(1, weight=1)
+        tk.Label(editor, text="Body", bg=COLORS["surface"], fg=COLORS["muted"]).grid(row=0, column=0, sticky="w")
+        body = tk.Text(
+            editor,
+            height=18,
+            wrap="word",
+            bg=COLORS["input"],
+            fg=COLORS["text"],
+            insertbackground=COLORS["text"],
+            padx=16,
+            pady=16,
+            borderwidth=0,
+            font=("Segoe UI", 10),
+        )
+        body.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
         body.insert("1.0", "Xin chao, day la email duoc ma hoa va ky so boi SecureMail.")
-        actions = tk.Frame(inner, bg=COLORS["surface"])
-        actions.pack(fill="x")
+
+        actions = tk.Frame(inner, bg=COLORS["surface_2"], highlightbackground=COLORS["border"], highlightthickness=1)
+        actions.grid(row=4, column=0, sticky="ew", padx=0, pady=(18, 0))
+        actions.grid_columnconfigure(1, weight=1)
         ttk.Button(actions, text="Preview recipient cert",
-                   command=lambda: self._preview_cert(to_entry.get().strip())).pack(side="left")
-        ttk.Button(actions, text="Send secure mail", style="Primary.TButton",
-                   command=lambda: self._send_mail(
-                       to_entry.get().strip(),
-                       subject_entry.get().strip(),
-                       body.get("1.0", "end-1c"),
-                   )).pack(side="left", padx=8)
+                   command=lambda: self._preview_cert(to_entry.get().strip())).grid(row=0, column=0, padx=18, pady=14)
+        tk.Label(actions, text="S/MIME + service ticket + policy check",
+                 bg=COLORS["surface_2"], fg=COLORS["muted"]).grid(row=0, column=1, sticky="w")
+        send_button = ttk.Button(
+            actions,
+            text="Send secure mail",
+            style="Primary.TButton",
+            command=lambda: self._send_mail(
+                to_entry.get().strip(),
+                subject_entry.get().strip(),
+                body.get("1.0", "end-1c"),
+            ),
+        )
+        send_button.grid(row=0, column=2, padx=18, pady=14)
+        self._compose_send_button = send_button
+        if self._send_in_progress:
+            self._set_compose_busy(True)
 
         for step in (
             "1. Lay CA root cert va CRL tu KDS",
@@ -763,6 +1410,37 @@ class SecureMailApp(tk.Tk):
             "7. Mail Server ky DKIM theo domain, kiem tra SPF/DKIM/DMARC va luu encrypted envelope",
         ):
             self._append_log(step)
+
+    def _set_compose_busy(self, busy: bool, status: str | None = None):
+        self._send_in_progress = busy
+        button = self._compose_send_button
+        if button is not None:
+            try:
+                if button.winfo_exists():
+                    button.configure(
+                        state="disabled" if busy else "normal",
+                        text="Sending..." if busy else "Send secure mail",
+                    )
+            except tk.TclError:
+                self._compose_send_button = None
+        label = self._compose_status_label
+        if label is not None:
+            try:
+                if label.winfo_exists():
+                    if status is None:
+                        status = "Sending" if busy else "Ready"
+                    status_key = status.lower()
+                    if busy:
+                        tone = "info"
+                    elif status_key.startswith("sent"):
+                        tone = "success"
+                    elif status_key.startswith("fail"):
+                        tone = "danger"
+                    else:
+                        tone = "gray"
+                    self._set_pill(label, status, tone)
+            except tk.TclError:
+                self._compose_status_label = None
 
     def _preview_cert(self, email: str):
         if not email:
@@ -781,10 +1459,22 @@ class SecureMailApp(tk.Tk):
             self._append_log(f"Cert subject: {cert.subject.rfc4514_string()}")
             self._append_log(f"Serial: {hex(cert.serial_number)}")
             self._append_log(f"Valid until: {cert.not_valid_after_utc}")
+            if self.mode == "client":
+                messagebox.showinfo(
+                    "Recipient certificate",
+                    "\n".join((
+                        f"Subject: {cert.subject.rfc4514_string()}",
+                        f"Serial: {hex(cert.serial_number)}",
+                        f"Valid until: {cert.not_valid_after_utc}",
+                    )),
+                )
 
         self._run_task("Preview recipient cert", action, done)
 
     def _send_mail(self, to_text: str, subject: str, body: str):
+        if self._send_in_progress:
+            self._set_compose_busy(True, "Sending")
+            return
         if not self.state_data.ctx:
             messagebox.showwarning("SecureMail", "Ban can login truoc khi gui mail.")
             return
@@ -792,6 +1482,7 @@ class SecureMailApp(tk.Tk):
         if not recipients or not subject or not body.strip():
             messagebox.showwarning("SecureMail", "Nhap To, Subject va Body.")
             return
+        self._set_compose_busy(True, "Sending")
 
         def action():
             return client_core.send_secure_email(
@@ -802,6 +1493,7 @@ class SecureMailApp(tk.Tk):
             )
 
         def done(result: dict[str, Any]):
+            self._set_compose_busy(False, "Sent")
             self._append_log(f"Envelope={result.get('envelope_len')} bytes; sender_copy={result.get('sender_copy_len')} bytes")
             for rcpt, resp in result.get("results", []):
                 self._append_log(f"{rcpt}: ok={resp.get('ok')} dmarc={resp.get('dmarc_action')} id={resp.get('message_id')}")
@@ -815,6 +1507,8 @@ class SecureMailApp(tk.Tk):
     def show_security(self):
         if not self._require_login():
             return
+        self._set_client_chrome(True)
+        self._set_active_nav("security")
         self._clear_main()
         self.operation_log = self._build_right_panel("Identity Security")
         self._page_title("Security / Certificates", "Kiem tra cert/key local va khoi phuc private key bang Shamir shares.")
@@ -870,20 +1564,31 @@ class SecureMailApp(tk.Tk):
         key_path = PROJECT_ROOT / "data" / "users" / f"{safe}.key.pem"
         cert_path = PROJECT_ROOT / "data" / "users" / f"{safe}.cert.pem"
         salt_path = PROJECT_ROOT / "data" / "users" / f"{safe}.salt.bin"
-        self._append_log(f"Key file: {'FOUND' if key_path.exists() else 'MISSING'} - {key_path}")
-        self._append_log(f"Cert file: {'FOUND' if cert_path.exists() else 'MISSING'} - {cert_path}")
-        self._append_log(f"Salt file: {'FOUND' if salt_path.exists() else 'MISSING'} - {salt_path}")
+        lines = [
+            f"Key file: {'FOUND' if key_path.exists() else 'MISSING'} - {key_path}",
+            f"Cert file: {'FOUND' if cert_path.exists() else 'MISSING'} - {cert_path}",
+            f"Salt file: {'FOUND' if salt_path.exists() else 'MISSING'} - {salt_path}",
+        ]
+        for line in lines:
+            self._append_log(line)
         if cert_path.exists():
             try:
                 cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
-                self._append_log(f"Subject: {cert.subject.rfc4514_string()}")
-                self._append_log(f"Issuer: {cert.issuer.rfc4514_string()}")
-                self._append_log(f"Serial: {hex(cert.serial_number)}")
-                self._append_log(f"Valid: {cert.not_valid_before_utc} -> {cert.not_valid_after_utc}")
+                cert_lines = [
+                    f"Subject: {cert.subject.rfc4514_string()}",
+                    f"Issuer: {cert.issuer.rfc4514_string()}",
+                    f"Serial: {hex(cert.serial_number)}",
+                    f"Valid: {cert.not_valid_before_utc} -> {cert.not_valid_after_utc}",
+                ]
+                lines.extend(cert_lines)
+                for line in cert_lines:
+                    self._append_log(line)
             except Exception as exc:
-                self._append_log(f"Cannot parse cert: {exc}")
+                line = f"Cannot parse cert: {exc}"
+                lines.append(line)
+                self._append_log(line)
         if not silent:
-            messagebox.showinfo("SecureMail", "Identity inspection da ghi vao panel ben phai.")
+            messagebox.showinfo("SecureMail Identity", "\n".join(lines))
 
     def _recover_key(self, email: str, shares: list[int]):
         if len(shares) != 2:
@@ -927,6 +1632,9 @@ class SecureMailApp(tk.Tk):
                 if all(is_port_open(port) for port in ports):
                     skipped.append(name)
                     continue
+                if name == "MAIL" and not mail_server_identity_exists():
+                    skipped.append("MAIL (bootstrap required)")
+                    continue
                 proc = self._launch_service(config["command"], env)
                 self._service_processes[name] = proc
                 started.append(name)
@@ -938,7 +1646,12 @@ class SecureMailApp(tk.Tk):
             if started:
                 self._append_log(f"Started services: {', '.join(started)}")
             if skipped:
-                self._append_log(f"Already running: {', '.join(skipped)}")
+                already_running = [item for item in skipped if "(" not in item]
+                skipped_with_reason = [item for item in skipped if "(" in item]
+                if already_running:
+                    self._append_log(f"Already running: {', '.join(already_running)}")
+                if skipped_with_reason:
+                    self._append_log(f"Skipped: {', '.join(skipped_with_reason)}")
             self._set_service_controls_busy(False)
             self.refresh_services()
 
@@ -1024,11 +1737,102 @@ class SecureMailApp(tk.Tk):
                 self._service_toggle_buttons.remove(btn)
 
     # ------------------------------------------------------------------
+    # Account Management
+    # ------------------------------------------------------------------
+    def show_accounts(self):
+        if not self._require_admin():
+            return
+        self._set_active_nav("accounts")
+        self._clear_main()
+        self.operation_log = self._build_right_panel("Account Admin")
+        self._page_title("Accounts", "Tao tai khoan moi bang phien admin da dang nhap.")
+
+        card = self._surface()
+        card.grid(row=1, column=0, sticky="ew")
+        card.grid_columnconfigure(0, weight=1)
+        inner = tk.Frame(card, bg=COLORS["surface"])
+        inner.grid(row=0, column=0, sticky="ew", padx=18, pady=18)
+        inner.grid_columnconfigure(0, weight=1)
+
+        tk.Label(inner, text="Create Account", bg=COLORS["surface"], fg=COLORS["text"],
+                 font=("Segoe UI Semibold", 14)).grid(row=0, column=0, sticky="w")
+
+        display_var = tk.StringVar()
+        email_var = tk.StringVar(value=f"new_admin@{DOMAIN}")
+        password_var = tk.StringVar()
+        confirm_var = tk.StringVar()
+        role_var = tk.StringVar(value="admin")
+        roles = tuple(sorted(client_core.ALLOWED_ROLES))
+
+        fields = (
+            ("Display name", display_var, False),
+            ("Email", email_var, False),
+            ("Password", password_var, True),
+            ("Confirm password", confirm_var, True),
+        )
+        for row_index, (label, var, masked) in enumerate(fields, start=1):
+            tk.Label(inner, text=label, bg=COLORS["surface"], fg=COLORS["muted"]).grid(
+                row=row_index * 2 - 1, column=0, sticky="w", pady=(12, 3)
+            )
+            ttk.Entry(inner, textvariable=var, show="*" if masked else "").grid(
+                row=row_index * 2, column=0, sticky="ew", ipady=5
+            )
+
+        tk.Label(inner, text="Role", bg=COLORS["surface"], fg=COLORS["muted"]).grid(
+            row=9, column=0, sticky="w", pady=(12, 3)
+        )
+        ttk.Combobox(inner, textvariable=role_var, values=roles, state="readonly").grid(
+            row=10, column=0, sticky="ew", ipady=5
+        )
+
+        ttk.Button(
+            inner,
+            text="Create account",
+            style="Primary.TButton",
+            command=lambda: self._create_account(
+                email_var.get().strip(),
+                password_var.get(),
+                confirm_var.get(),
+                display_var.get().strip(),
+                role_var.get(),
+            ),
+        ).grid(row=11, column=0, sticky="w", pady=(16, 0))
+
+        self._append_log(f"Current admin={self.state_data.email}")
+        self._append_log("Public Register chi tao role=user; role=admin phai tao tai day.")
+
+    def _create_account(self, email: str, password: str, confirm_password: str, display_name: str, role: str):
+        if not self._require_admin():
+            return
+        if not email or not password:
+            messagebox.showwarning("SecureMail", "Nhap email va password de tao tai khoan.")
+            return
+        if password != confirm_password:
+            messagebox.showwarning("SecureMail", "Password va confirm password khong khop.")
+            return
+
+        actor_ctx = self.state_data.ctx
+
+        def action():
+            return client_core.admin_register_account(actor_ctx, email, password, display_name, role)
+
+        def done(result: dict[str, Any]):
+            created_role = result.get("role", role)
+            self._append_log(f"Created {email}; role={created_role}; serial={result.get('serial')}")
+            messagebox.showinfo(
+                "SecureMail",
+                f"Created {email}\nRole: {created_role}\nSerial: {result.get('serial')}",
+            )
+
+        self._run_task("Create account", action, done)
+
+    # ------------------------------------------------------------------
     # DKIM Domain Management
     # ------------------------------------------------------------------
     def show_dkim_domains(self):
         if not self._require_admin():
             return
+        self._set_active_nav("dkim")
         self._clear_main()
         self.operation_log = self._build_right_panel("DKIM Domain Registry")
         self._page_title("DKIM Domains", "Dang ky domain MTA vao KDS de Mail Server ky va verify DKIM.")
@@ -1073,9 +1877,13 @@ class SecureMailApp(tk.Tk):
     def show_monitor(self):
         if not self._require_admin():
             return
+        self._set_active_nav("monitor")
         self._clear_main()
         self.operation_log = self._build_right_panel("Monitor Detail")
-        self._page_title("Monitoring Dashboard", "Service status, metrics, audit event stream va alert bao mat.")
+        self._page_title("Monitor Dashboard", "Service health, audit trail, security alerts and operational metrics.")
+        self.main.grid_rowconfigure(1, weight=0)
+        self.main.grid_rowconfigure(2, weight=0)
+        self.main.grid_rowconfigure(3, weight=1)
 
         top = tk.Frame(self.main, bg=COLORS["bg"])
         top.grid(row=1, column=0, sticky="ew")
@@ -1090,9 +1898,27 @@ class SecureMailApp(tk.Tk):
         self._add_service_toggle_button(actions).pack(fill="x", pady=(0, 6))
         ttk.Button(actions, text="Refresh dashboard", style="Primary.TButton",
                    command=self._refresh_monitor_data).pack(fill="x")
+        ttk.Button(actions, text="Detail panel",
+                   command=self._toggle_detail_panel).pack(fill="x", pady=(6, 0))
+
+        metric_bar = tk.Frame(self.main, bg=COLORS["bg"])
+        metric_bar.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        self.monitor_metric_values: dict[str, tk.Label] = {}
+        metric_defs = (
+            ("total_mails", "Mail stored", "info"),
+            ("dmarc_quarantine", "Quarantine", "warning"),
+            ("revoked_certs", "Revoked certs", "danger"),
+            ("active_principals", "Principals", "success"),
+            ("revoked_tgts", "Revoked TGT", "primary"),
+        )
+        for i, (key, label, tone) in enumerate(metric_defs):
+            card, value_label = self._metric_card(metric_bar, label, "0", tone)
+            card.grid(row=0, column=i, sticky="ew", padx=(0 if i == 0 else 8, 0))
+            metric_bar.grid_columnconfigure(i, weight=1)
+            self.monitor_metric_values[key] = value_label
 
         lower = tk.Frame(self.main, bg=COLORS["bg"])
-        lower.grid(row=2, column=0, sticky="nsew")
+        lower.grid(row=3, column=0, sticky="nsew")
         lower.grid_columnconfigure(0, weight=1)
         lower.grid_columnconfigure(1, weight=1)
         lower.grid_rowconfigure(0, weight=1)
@@ -1116,16 +1942,16 @@ class SecureMailApp(tk.Tk):
         alerts_card.grid_rowconfigure(1, weight=1)
         tk.Label(alerts_card, text="Alerts / Metrics", bg=COLORS["surface"], fg=COLORS["text"],
                  font=("Segoe UI Semibold", 13)).grid(row=0, column=0, sticky="w", padx=12, pady=10)
-        self.alert_text = tk.Text(alerts_card, wrap="word", bg="#F8FAFC", fg=COLORS["text"], padx=10, pady=10,
-                                  borderwidth=0, font=("Consolas", 9))
+        self.alert_text = tk.Text(alerts_card, wrap="word", bg=COLORS["input"], fg=COLORS["text"], padx=12, pady=12,
+                                  insertbackground=COLORS["text"], borderwidth=0, font=("Consolas", 9))
         self.alert_text.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
         self._refresh_monitor_data()
 
     def _metric_card(self, parent: tk.Widget, title: str, value: str, tone: str) -> tuple[tk.Frame, tk.Label]:
-        card = tk.Frame(parent, bg=COLORS["surface"], highlightbackground=COLORS["border"], highlightthickness=1)
-        tk.Label(card, text=title, bg=COLORS["surface"], fg=COLORS["muted"],
+        card = tk.Frame(parent, bg=COLORS["surface_2"], highlightbackground=COLORS["border"], highlightthickness=1)
+        tk.Label(card, text=title, bg=COLORS["surface_2"], fg=COLORS["muted"],
                  font=("Segoe UI Semibold", 8)).pack(anchor="w", padx=12, pady=(10, 1))
-        value_label = tk.Label(card, text=value, bg=COLORS["surface"], fg=COLORS.get(tone, COLORS["text"]),
+        value_label = tk.Label(card, text=value, bg=COLORS["surface_2"], fg=COLORS.get(tone, COLORS["text"]),
                                font=("Segoe UI Semibold", 15))
         value_label.pack(anchor="w", padx=12, pady=(0, 10))
         return card, value_label
@@ -1137,8 +1963,9 @@ class SecureMailApp(tk.Tk):
         def done(statuses: dict[str, bool]):
             self.state_data.services = statuses
             for name, ok in statuses.items():
-                self._set_pill(self._service_labels[name], f"{name} {'ON' if ok else 'OFF'}",
-                               "success" if ok else "danger")
+                if name in self._service_labels:
+                    self._set_pill(self._service_labels[name], f"{name} {'ON' if ok else 'OFF'}",
+                                   "success" if ok else "danger")
                 if hasattr(self, "monitor_service_values") and name in self.monitor_service_values:
                     self.monitor_service_values[name].configure(
                         text="ON" if ok else "OFF",
@@ -1158,10 +1985,22 @@ class SecureMailApp(tk.Tk):
             }
 
         def done(data: dict[str, Any]):
+            self._populate_metric_cards(data["metrics"])
             self._populate_logs(data["logs"])
             self._populate_alerts(data["logs"], data["metrics"])
 
         self._run_task("Load monitoring data", action, done)
+
+    def _populate_metric_cards(self, metrics: dict[str, Any]):
+        values = getattr(self, "monitor_metric_values", {})
+        if not values:
+            return
+        if metrics.get("error"):
+            for key, label in values.items():
+                label.configure(text="ERR", fg=COLORS["danger"])
+            return
+        for key, label in values.items():
+            label.configure(text=str(metrics.get(key, 0)))
 
     def _register_dkim_domain(self, domain: str):
         if not self._require_admin():
@@ -1231,6 +2070,7 @@ class SecureMailApp(tk.Tk):
         if idx >= len(logs):
             return
         log = logs[idx]
+        self._show_detail_panel()
         self.operation_log = self._build_right_panel("Selected Event")
         self._append_log(f"Time: {format_ts(log.get('ts'))}")
         self._append_log(f"Service: {log.get('service')}")
@@ -1243,6 +2083,7 @@ class SecureMailApp(tk.Tk):
     def show_scenarios(self):
         if not self._require_admin():
             return
+        self._set_active_nav("scenario")
         self._clear_main()
         self.operation_log = self._build_right_panel("Scenario Evidence")
         self._page_title("Scenario Lab", "Chay bootstrap va 8 kich ban bao mat tu run_demo.py.")
@@ -1317,6 +2158,10 @@ class SecureMailApp(tk.Tk):
                 self.scenario_console.configure(state="normal")
                 self.scenario_console.insert("end", output)
                 self.scenario_console.configure(state="disabled")
+            else:
+                lines = [line for line in output.splitlines() if line.strip()]
+                for line in lines[-8:]:
+                    self._append_log(line[:260])
             passed = code == 0 and ("[FAIL]" not in output)
             status_text = "PASS" if passed else "CHECK"
             if cmd in getattr(self, "scenario_rows", {}):
@@ -1324,6 +2169,13 @@ class SecureMailApp(tk.Tk):
                 self.state_data.scenario_status[cmd] = status_text
             self._append_log(f"Scenario {cmd} exit_code={code}; status={status_text}")
             self._append_log(explain_scenario(cmd, output))
+            if cmd == "bootstrap" and code == 0:
+                self.refresh_services()
+                self._append_log("Default admin ready: admin@mail.local / admin-pw")
+                messagebox.showinfo(
+                    "SecureMail",
+                    "Bootstrap/repair done.\nLogin Monitor with admin@mail.local / admin-pw.",
+                )
 
         self._run_task(f"Run scenario {cmd}", action, done)
 
@@ -1351,6 +2203,11 @@ def friendly_error(exc: BaseException) -> str:
         return "Recipient has no certificate in KDS."
     if "revoked" in lower or "ocsp=revoked" in lower:
         return "Certificate has been revoked."
+    if "incorrect password" in lower or "wrong password" in lower:
+        return (
+            "Sai password hoac local key khong khop. Demo admin dung "
+            "admin@mail.local / admin-pw. Neu van loi, bam Bootstrap demo data de repair."
+        )
     if "decrypt" in lower:
         return "Login/decryption failed. Check password or recovered private key."
     if "login failed" in lower:
@@ -1366,6 +2223,22 @@ def is_port_open(port: int) -> bool:
             return True
     except OSError:
         return False
+
+
+def mail_server_identity_exists() -> bool:
+    return (
+        (PROJECT_ROOT / "data/server/mail_key.pem").exists()
+        and (PROJECT_ROOT / "data/server/mail_cert.pem").exists()
+    )
+
+
+def is_valid_email(email: str) -> bool:
+    if not email or email.count("@") != 1:
+        return False
+    local, domain = email.split("@", 1)
+    if not local or not domain or any(ch.isspace() for ch in email):
+        return False
+    return "." in domain and not domain.startswith(".") and not domain.endswith(".")
 
 
 def find_service_pids() -> set[int]:
@@ -1529,10 +2402,32 @@ def explain_scenario(cmd: str, output: str) -> str:
     return f"{name}: hoan tat subprocess, can xem console output de ket luan."
 
 
-def main():
+def _parse_gui_args(argv: list[str] | None) -> str:
+    parser = argparse.ArgumentParser(description="SecureMail Tkinter GUI")
+    parser.add_argument(
+        "mode",
+        nargs="?",
+        choices=sorted(APP_MODES),
+        help="GUI mode to open: client, monitor, or all",
+    )
+    parser.add_argument(
+        "--mode",
+        dest="mode_option",
+        choices=sorted(APP_MODES),
+        help="GUI mode to open: client, monitor, or all",
+    )
+    args = parser.parse_args(argv)
+    return args.mode_option or args.mode or "client"
+
+
+def launch(mode: str = "client"):
     os.chdir(PROJECT_ROOT)
-    app = SecureMailApp()
+    app = SecureMailApp(mode=mode)
     app.mainloop()
+
+
+def main(argv: list[str] | None = None):
+    launch(_parse_gui_args(argv))
 
 
 if __name__ == "__main__":

@@ -30,6 +30,7 @@ SERVER_DIR = Path("data/server")
 SESSION_FILE = Path("data/active_session.json")
 SESSION_SCHEMA_VERSION = 2
 RESERVED_PUBLIC_REGISTER_EMAILS = {"admin@mail.local"}
+ALLOWED_ROLES = {"user", "admin", "mailing_list_manager"}
 DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
 
@@ -42,6 +43,14 @@ def _normalize_domain(domain: str) -> str:
     normalized = domain.strip().lower().removeprefix("@")
     if not DOMAIN_RE.match(normalized):
         raise ValueError("invalid domain name")
+    return normalized
+
+
+def _normalize_role(role: str) -> str:
+    normalized = (role or "user").strip().lower()
+    if normalized not in ALLOWED_ROLES:
+        allowed = ", ".join(sorted(ALLOWED_ROLES))
+        raise ValueError(f"invalid role '{role}', expected one of: {allowed}")
     return normalized
 
 
@@ -173,6 +182,8 @@ def register(email: str, password: str, display_name: str = "", role: str = "use
 
     Store locally: cert.pem + encrypted_key.pem + salt.bin
     """
+    email = email.strip().lower()
+    role = _normalize_role(role)
     USER_DIR.mkdir(parents=True, exist_ok=True)
 
     # 1. Generate RSA keypair
@@ -222,15 +233,58 @@ def register(email: str, password: str, display_name: str = "", role: str = "use
     key_escrow.escrow_key(email, priv_pem)
 
     print(f"[REG] Registered {email} — serial={serial_hex}")
-    return {"cert_pem": cert_pem, "serial": serial_hex}
+    return {"email": email, "role": role, "cert_pem": cert_pem, "serial": serial_hex}
 
 
 def public_register(email: str, password: str, display_name: str = ""):
     """Register a self-service account. Public signup always creates a normal user."""
     normalized = email.strip().lower()
     if normalized in RESERVED_PUBLIC_REGISTER_EMAILS:
-        raise RuntimeError("admin account can only be created by bootstrap")
+        raise RuntimeError("admin account can only be created by a logged-in admin")
+    if account_exists(normalized):
+        raise RuntimeError(f"account already exists: {normalized}")
     return register(normalized, password, display_name, role="user")
+
+
+def account_exists(email: str) -> bool:
+    """Best-effort duplicate check across local identity files, KDS and Ticket DB."""
+    normalized = email.strip().lower()
+    if not normalized:
+        return False
+    for suffix in ("key.pem", "cert.pem", "salt.bin"):
+        if _user_path(normalized, suffix).exists():
+            return True
+    try:
+        if kds_client.get_cert(normalized):
+            return True
+    except Exception:
+        pass
+    try:
+        from securemail.db_conn import get_conn
+        conn = get_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM ticket.principals WHERE id_c=%s", (normalized,))
+        row = cursor.fetchone()
+        conn.close()
+        return bool(row and row[0])
+    except Exception:
+        return False
+
+
+def admin_register_account(
+    actor_ctx: dict | None,
+    email: str,
+    password: str,
+    display_name: str = "",
+    role: str = "user",
+):
+    """Create an account from an authenticated admin session."""
+    if actor_ctx is None:
+        raise PermissionError("admin login required to create accounts")
+    if actor_ctx.get("role") != "admin":
+        raise PermissionError("only admin can create accounts")
+    normalized_role = _normalize_role(role)
+    return register(email, password, display_name, role=normalized_role)
 
 
 def register_dkim_domain(domain: str, overwrite: bool = False) -> dict:

@@ -49,6 +49,19 @@ Nếu Mail Server báo thiếu key/cert, chạy bootstrap trước rồi mở l�
 python -m securemail.run_demo bootstrap
 ```
 
+GUI hiện có 2 lệnh tách vai trò:
+
+```powershell
+# Client cho user: login/register user, gửi/nhận/đọc mail, recovery
+python -m securemail.gui.app --mode client
+
+# Monitor: bật service trước, sau đó login admin để xem log/warning/audit/metrics
+python -m securemail.main_monitor
+```
+
+Trên Windows có thể dùng `run_client.bat` và `run_monitor.bat`.
+Lan dau chua co admin, mo Monitor, bam `Start all services`, roi bam `Bootstrap demo data` o man hinh Monitor Login de tao `admin@mail.local` / `admin-pw`.
+
 ## 3. Stateful CLI
 
 Stateful CLI là chế độ chạy từng lệnh một. Sau khi `login`, chương trình lưu phiên vào:
@@ -71,7 +84,11 @@ Các lệnh sau như `send`, `list`, `read`, `fetch`, `recover`, `status`, `logo
 | `python -m securemail.main_client read <id>` | Xem chi tiết một email theo ID. |
 | `python -m securemail.main_client fetch` | Dump toàn bộ inbox kiểu legacy. |
 | `python -m securemail.main_client recover [<email>] [<share1> <share2>]` | Khôi phục private key bằng Shamir 2-of-3. |
+| `python -m securemail.main_client admin-register <email> <password> [<display>]` | Tạo tài khoản admin mới, bắt buộc session hiện tại là admin. |
 | `python -m securemail.main_client logout` | Đăng xuất và xóa session local. |
+| `python -m securemail.main_client gui [client\|monitor\|all]` | Mở GUI theo mode; mặc định là `client`. |
+
+Public `register` luôn tạo role `user`. Muốn tạo role `admin`, login trước bằng admin rồi dùng `admin-register` hoặc mở Monitor > `Accounts`.
 
 ### 3.2. Quy trình test đủ 9 lệnh CLI
 
