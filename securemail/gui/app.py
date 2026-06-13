@@ -615,6 +615,26 @@ class SecureMailApp(tk.Tk):
         self.show_login()
         return False
 
+    def _require_key(self) -> bool:
+        """Require both a valid session AND a usable private key.
+
+        If the user is logged in but their local private key is missing
+        or corrupted (restricted mode), redirect them to the Security /
+        Recovery screen instead of crashing.
+        """
+        if not self._require_login():
+            return False
+        if self.state_data.ctx.get("privkey") is not None:
+            return True
+        messagebox.showwarning(
+            "SecureMail",
+            "Local private key is missing or corrupted.\n"
+            "You are in restricted mode.\n\n"
+            "Please go to Security / Recovery to restore your key.",
+        )
+        self.show_security()
+        return False
+
     def _require_admin(self) -> bool:
         if self.state_data.role == "admin":
             return True
@@ -1014,12 +1034,12 @@ class SecureMailApp(tk.Tk):
     # Mailbox
     # ------------------------------------------------------------------
     def show_inbox(self):
-        if not self._require_login():
+        if not self._require_key():
             return
         self._show_mailbox("inbox")
 
     def show_sent(self):
-        if not self._require_login():
+        if not self._require_key():
             return
         self._show_mailbox("sent")
 
@@ -1318,7 +1338,7 @@ class SecureMailApp(tk.Tk):
     # Compose
     # ------------------------------------------------------------------
     def show_compose(self):
-        if not self._require_login():
+        if not self._require_key():
             return
         self._set_client_chrome(True)
         self._set_active_nav("compose")
@@ -1605,7 +1625,11 @@ class SecureMailApp(tk.Tk):
 
         def done(recovered: bytes):
             self._append_log(f"Recovered {len(recovered)} bytes for {email} using shares {shares}")
-            messagebox.showinfo("SecureMail", f"Recovered private key for {email}.")
+            messagebox.showinfo(
+                "SecureMail",
+                f"Key recovered successfully for {email}!\n\n"
+                f"Please log out and log in again to activate your key.",
+            )
 
         self._run_task("Recover key", action, done)
 

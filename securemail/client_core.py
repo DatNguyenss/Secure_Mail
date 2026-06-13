@@ -62,6 +62,7 @@ def save_session(ctx: dict):
     can reuse the session without re-entering email/password.
 
     The private key is stored as unencrypted PEM (session-local only).
+    If the session has no private key (restricted mode), the field is omitted.
     """
     SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
     data = {
@@ -70,14 +71,21 @@ def save_session(ctx: dict):
         "role": ctx.get("role", "user"),
         "tgt": ctx["tgt"],
         "k_c_tgs_b64": base64.b64encode(ctx["k_c_tgs"]).decode("ascii"),
-        "cert_pem": ctx["cert_pem"].decode("utf-8"),
-        "privkey_pem": rsa_handler.serialize_private_pem(ctx["privkey"]).decode("utf-8"),
+        "cert_pem": ctx["cert_pem"].decode("utf-8") if ctx.get("cert_pem") else "",
+        "key_status": ctx.get("key_status", "ok"),
     }
+    if ctx.get("privkey") is not None:
+        data["privkey_pem"] = rsa_handler.serialize_private_pem(ctx["privkey"]).decode("utf-8")
     SESSION_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
 def load_session() -> dict | None:
-    """Load a previously saved session.  Returns ctx dict or None."""
+    """Load a previously saved session.  Returns ctx dict or None.
+
+    Sessions saved in restricted mode (no private key) are loaded with
+    ``privkey=None`` and ``key_status`` preserved so the UI can direct
+    the user to recovery.
+    """
     if not SESSION_FILE.exists():
         return None
     try:
@@ -86,16 +94,26 @@ def load_session() -> dict | None:
             print("[Session] Ignoring old session format. Please login again.")
             clear_session()
             return None
-        privkey = rsa_handler.load_private_pem(
-            data["privkey_pem"].encode("utf-8"), None
-        )
+        privkey = None
+        key_status = data.get("key_status", "ok")
+        if "privkey_pem" in data and data["privkey_pem"]:
+            try:
+                privkey = rsa_handler.load_private_pem(
+                    data["privkey_pem"].encode("utf-8"), None
+                )
+                key_status = "ok"
+            except Exception:
+                key_status = "corrupt"
+        else:
+            key_status = key_status if key_status != "ok" else "missing"
         return {
             "email": data["email"],
             "role": data.get("role", "user"),
             "tgt": data["tgt"],
             "k_c_tgs": base64.b64decode(data["k_c_tgs_b64"]),
-            "cert_pem": data["cert_pem"].encode("utf-8"),
+            "cert_pem": data["cert_pem"].encode("utf-8") if data.get("cert_pem") else b"",
             "privkey": privkey,
+            "key_status": key_status,
         }
     except Exception as exc:
         print(f"[Session] Failed to load session: {exc}")
@@ -365,15 +383,44 @@ def _lookup_principal_role(email: str) -> str | None:
 
 
 def login(email: str, password: str) -> dict:
-    """AS-REQ → get TGT. Also load local private key.
+    """AS-REQ → get TGT. Also attempt to load local private key.
 
-    Returns ctx = {email, privkey, cert_pem, tgt, k_c_tgs}.
+    Authentication with the Ticket Service is performed first.  If the
+    local private key is missing or corrupted the login still succeeds
+    but ``privkey`` will be ``None`` and ``key_status`` will indicate
+    the reason (``"missing"`` or ``"corrupt"``).  The caller / UI can
+    then offer a restricted mode where the user can recover their key.
+
+    Returns ctx = {email, privkey, cert_pem, tgt, k_c_tgs, key_status}.
     """
-    key_pem = _user_path(email, "key.pem").read_bytes()
-    cert_pem = _user_path(email, "cert.pem").read_bytes()
-    privkey = rsa_handler.load_private_pem(key_pem, password.encode("utf-8"))
-
+    # 1. Authenticate with Ticket Service first — this only needs the
+    #    password (Kc derived from password), not the local key file.
     as_resp = ts_client.as_request(email, password)
+
+    # 2. Attempt to load local key material.  Failures are non-fatal.
+    privkey = None
+    cert_pem = b""
+    key_status = "ok"
+
+    try:
+        cert_pem = _user_path(email, "cert.pem").read_bytes()
+    except FileNotFoundError:
+        pass
+
+    key_path = _user_path(email, "key.pem")
+    if not key_path.exists():
+        key_status = "missing"
+        print(f"[Login] Private key file not found for {email}. "
+              f"Entering restricted mode — use Security / Recovery to restore.")
+    else:
+        try:
+            key_pem = key_path.read_bytes()
+            privkey = rsa_handler.load_private_pem(key_pem, password.encode("utf-8"))
+        except Exception as exc:
+            key_status = "corrupt"
+            print(f"[Login] Cannot load private key for {email}: {exc}. "
+                  f"Entering restricted mode — use Security / Recovery to restore.")
+
     return {
         "email": email,
         "role": as_resp.get("role") or _lookup_principal_role(email) or "user",
@@ -381,6 +428,7 @@ def login(email: str, password: str) -> dict:
         "cert_pem": cert_pem,
         "tgt": as_resp["tgt"],
         "k_c_tgs": as_resp["k_c_tgs"],
+        "key_status": key_status,
     }
 
 
