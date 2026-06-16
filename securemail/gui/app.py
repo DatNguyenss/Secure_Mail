@@ -2272,11 +2272,46 @@ class SecureMailApp(tk.Tk):
 
         list_card = self._surface(shell)
         list_card.grid(row=0, column=0, sticky="ns", padx=(0, 10))
-        list_inner = tk.Frame(list_card, bg=COLORS["surface"])
-        list_inner.pack(fill="both", expand=True, padx=12, pady=12)
-        ttk.Button(list_inner, text="Bootstrap", style="Primary.TButton",
+        list_card.grid_columnconfigure(0, weight=1)
+        list_card.grid_rowconfigure(1, weight=1)
+
+        list_actions = tk.Frame(list_card, bg=COLORS["surface"])
+        list_actions.grid(row=0, column=0, columnspan=2, sticky="ew", padx=12, pady=(12, 8))
+        ttk.Button(list_actions, text="Bootstrap", style="Primary.TButton",
                    command=lambda: self._run_scenario_cmd("bootstrap")).pack(fill="x", pady=(0, 6))
-        ttk.Button(list_inner, text="Run all", command=lambda: self._run_scenario_cmd("all")).pack(fill="x", pady=(0, 12))
+        ttk.Button(list_actions, text="Run all", command=lambda: self._run_scenario_cmd("all")).pack(fill="x")
+
+        scenario_canvas = tk.Canvas(list_card, bg=COLORS["surface"], highlightthickness=0, borderwidth=0, width=310)
+        scenario_scroll = ttk.Scrollbar(list_card, orient="vertical", command=scenario_canvas.yview)
+        scenario_canvas.configure(yscrollcommand=scenario_scroll.set)
+        scenario_canvas.grid(row=1, column=0, sticky="nsew", padx=(12, 0), pady=(0, 12))
+        scenario_scroll.grid(row=1, column=1, sticky="ns", padx=(4, 12), pady=(0, 12))
+
+        list_inner = tk.Frame(scenario_canvas, bg=COLORS["surface"])
+        scenario_window = scenario_canvas.create_window((0, 0), window=list_inner, anchor="nw")
+
+        def sync_scenario_scrollregion(_event: tk.Event | None = None):
+            scenario_canvas.configure(scrollregion=scenario_canvas.bbox("all"))
+
+        def sync_scenario_width(event: tk.Event):
+            scenario_canvas.itemconfigure(scenario_window, width=event.width)
+
+        def bind_scenario_mousewheel(_event: tk.Event):
+            scenario_canvas.bind_all("<MouseWheel>", on_scenario_mousewheel)
+
+        def unbind_scenario_mousewheel(_event: tk.Event):
+            scenario_canvas.unbind_all("<MouseWheel>")
+
+        def on_scenario_mousewheel(event: tk.Event):
+            scenario_canvas.yview_scroll(int(-event.delta / 120), "units")
+
+        list_inner.bind("<Configure>", sync_scenario_scrollregion)
+        scenario_canvas.bind("<Configure>", sync_scenario_width)
+        scenario_canvas.bind("<Enter>", bind_scenario_mousewheel)
+        scenario_canvas.bind("<Leave>", unbind_scenario_mousewheel)
+        list_inner.bind("<Enter>", bind_scenario_mousewheel)
+        list_inner.bind("<Leave>", unbind_scenario_mousewheel)
+
         self.scenario_rows: dict[str, tk.Label] = {}
         for number, (name, mechanism) in SCENARIO_META.items():
             row = tk.Frame(list_inner, bg=COLORS["surface"], highlightbackground=COLORS["border"], highlightthickness=1)
