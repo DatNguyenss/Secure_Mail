@@ -69,10 +69,13 @@ def _create_server_identity(common_name: str, email: str, passphrase: bytes,
 
 
 def _user_registered(email: str) -> bool:
-    user_key = Path(f"data/users/{email.replace('@','_at_')}.key.pem")
-    if not user_key.exists():
+    safe = email.replace('@', '_at_')
+    # Check new dual-key files OR legacy single-key file
+    sign_key = Path(f"data/users/{safe}.sign_key.pem")
+    legacy_key = Path(f"data/users/{safe}.key.pem")
+    if not sign_key.exists() and not legacy_key.exists():
         return False
-    if not kds_client.get_cert(email):
+    if not kds_client.get_sign_cert(email) and not kds_client.get_cert(email):
         return False
     conn = get_conn()
     cursor = conn.cursor()
@@ -96,6 +99,11 @@ def _demo_identity_usable(email: str, password: str, role: str) -> bool:
         ctx = client_core.login(email, password)
     except Exception as exc:
         print(f"  repair {email} (demo password/key mismatch: {exc})")
+        return False
+    # For dual-keypair accounts, sign_key must be ok (enc_key can auto-recover)
+    ks = ctx.get("key_status", "ok")
+    if ks in ("sign_key_missing", "sign_key_corrupt"):
+        print(f"  repair {email} (sign key {ks} — must re-register)")
         return False
     if ctx.get("role") != role:
         _ensure_principal_role(email, role)
@@ -133,7 +141,7 @@ def bootstrap():
         if _demo_identity_usable(email, pw, role):
             print(f"  skip {email} (already exists, role={role})")
             continue
-        client_core.register(email, pw, display, role)
+        client_core.register(email, pw, display, role, force=True)
 
     # 4. SPF records + DMARC policy
     print("[boot] setting SPF + DMARC policy ...")
@@ -231,9 +239,12 @@ def scenario_3_replay_attack():
     # Send a legitimate email first
     from securemail.network import smtp_client
     from securemail.mail import smime_handler
-    bob_cert_pem = kds_client.get_cert(f"bob@{DOMAIN}")
+    bob_enc_cert = kds_client.get_enc_cert(f"bob@{DOMAIN}") or kds_client.get_cert(f"bob@{DOMAIN}")
     env = smime_handler.build_envelope(
-        b"replay test", [(f"bob@{DOMAIN}", bob_cert_pem)], alice["cert_pem"], alice["privkey"]
+        b"replay test",
+        [(f"bob@{DOMAIN}", bob_enc_cert)],
+        alice.get("sign_cert_pem") or alice["cert_pem"],
+        alice.get("sign_privkey") or alice["privkey"],
     )
     headers = {"From": alice["email"], "To": f"bob@{DOMAIN}",
                "Subject": "[S3] Replay test", "Date": "now",
@@ -305,14 +316,14 @@ def scenario_4_revoked_cert():
 
     # Re-issue cert for alice (so other scenarios still work)
     print("  re-issuing cert for alice (cleanup) ...")
-    # remove old files, re-register
-    Path(f"data/users/alice_at_{DOMAIN}.key.pem").unlink(missing_ok=True)
-    Path(f"data/users/alice_at_{DOMAIN}.cert.pem").unlink(missing_ok=True)
-    Path(f"data/users/alice_at_{DOMAIN}.salt.bin").unlink(missing_ok=True)
-    # Unique email to avoid DB unique constraint on old one
-    # Actually we just reissue — ca_core inserts new serial automatically.
-    client_core.register(f"alice@{DOMAIN}", "alice-pw", "Alice", "user")
-    # refresh CRL too (alice's old cert still revoked in CRL — that's fine)
+    safe = f"alice_at_{DOMAIN}"
+    # Remove old dual-key and legacy files
+    for suffix in ("sign_key.pem", "sign_cert.pem", "enc_key.pem", "enc_cert.pem",
+                   "key.pem", "cert.pem", "salt.bin"):
+        p = Path(f"data/users/{safe}.{suffix}")
+        if p.exists():
+            p.unlink()
+    client_core.register(f"alice@{DOMAIN}", "alice-pw", "Alice", "user", force=True)
 
 
 def scenario_5_spoofed_sender():
@@ -330,11 +341,12 @@ def scenario_5_spoofed_sender():
 
     eve = client_core.login(f"eve@{DOMAIN}", "eve-pw")
     # Craft envelope: Eve signs her own but forges From header
-    bob_cert = kds_client.get_cert(f"bob@{DOMAIN}")
+    bob_enc_cert = kds_client.get_enc_cert(f"bob@{DOMAIN}") or kds_client.get_cert(f"bob@{DOMAIN}")
     env = smime_handler.build_envelope(
         b"I'm Alice, trust me!",
-        [(f"bob@{DOMAIN}", bob_cert)],
-        eve["cert_pem"], eve["privkey"],
+        [(f"bob@{DOMAIN}", bob_enc_cert)],
+        eve.get("sign_cert_pem") or eve["cert_pem"],
+        eve.get("sign_privkey") or eve["privkey"],
     )
     headers = {"From": f"alice@{DOMAIN}", "To": f"bob@{DOMAIN}",
                "Subject": "[S5] spoof from Alice", "Date": "now",
@@ -373,13 +385,14 @@ def scenario_6_reusable_ticket():
     st = client_core.get_service_ticket(alice)
     print(f"  TGT lifetime: {st['lifetime']} seconds — sending 5 emails with same Ticket_v")
 
-    bob_cert = kds_client.get_cert(f"bob@{DOMAIN}")
+    bob_enc_cert = kds_client.get_enc_cert(f"bob@{DOMAIN}") or kds_client.get_cert(f"bob@{DOMAIN}")
     from securemail.network import smtp_client
     for i in range(5):
         env = smime_handler.build_envelope(
             f"reusable ticket test #{i+1}".encode(),
-            [(f"bob@{DOMAIN}", bob_cert)],
-            alice["cert_pem"], alice["privkey"],
+            [(f"bob@{DOMAIN}", bob_enc_cert)],
+            alice.get("sign_cert_pem") or alice["cert_pem"],
+            alice.get("sign_privkey") or alice["privkey"],
         )
         headers = {"From": alice["email"], "To": f"bob@{DOMAIN}",
                    "Subject": f"[S6] reusable #{i+1}", "Date": "now",
@@ -396,18 +409,35 @@ def scenario_6_reusable_ticket():
 
 def scenario_7_key_recovery():
     _banner("Scenario 7 — Key Recovery (A9 — Shamir 2-of-3, bonus)")
+    print("  DUAL KEY PAIR: escrow contains ENCRYPTION keys only (signing keys are never escrowed).")
     for user in ("alice", "bob", "eve", "admin"):
         email = f"{user}@{DOMAIN}"
         safe = email.replace("@", "_at_")
-        expected = Path(f"data/users/{safe}.key.pem").read_bytes()
+        enc_key_path = Path(f"data/users/{safe}.enc_key.pem")
+        if not enc_key_path.exists():
+            print(f"  SKIP {email}: no enc_key.pem (old single-key account — run bootstrap first)")
+            continue
+        expected_enc = enc_key_path.read_bytes()
         recovered = key_escrow.recover_key(email, [1, 2])
-        assert recovered == expected, f"Recovered key mismatch for {email}!"
-        print(f"  [OK] {email}: recovered {len(recovered)} bytes using shares 1+2")
+        assert recovered == expected_enc, f"Recovered enc_key mismatch for {email}!"
+        print(f"  [OK] {email}: enc_key recovered {len(recovered)} bytes using shares 1+2")
 
-    recovered2 = key_escrow.recover_key(f"bob@{DOMAIN}", [1, 3])
-    expected2 = Path(f"data/users/bob_at_{DOMAIN}.key.pem").read_bytes()
-    assert recovered2 == expected2
-    print("  [OK] Bob shares 1+3 also work")
+        # Verify: sign_key is NOT in escrow (should fail)
+        sign_key_path = Path(f"data/users/{safe}.sign_key.pem")
+        if sign_key_path.exists():
+            sign_pem = sign_key_path.read_bytes()
+            assert recovered != sign_pem, \
+                f"SECURITY VIOLATION: escrow returned signing key for {email}!"
+            print(f"  [OK] {email}: sign_key confirmed NOT escrowed (non-repudiation preserved)")
+
+    # Cross-check with shares 1+3
+    bob_email = f"bob@{DOMAIN}"
+    bob_safe = bob_email.replace("@", "_at_")
+    bob_enc = Path(f"data/users/{bob_safe}.enc_key.pem")
+    if bob_enc.exists():
+        recovered2 = key_escrow.recover_key(bob_email, [1, 3])
+        assert recovered2 == bob_enc.read_bytes()
+        print("  [OK] Bob enc_key shares 1+3 also work")
 
 
 def scenario_8_subsession_hkdf():

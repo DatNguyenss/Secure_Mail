@@ -765,3 +765,70 @@ Alice Client                TGS / KDC                 KDS                  SMTP 
 - **Tích hợp HSM (Hardware Security Module) hoặc KMS:** Triển khai thay thế lưu trữ Private Key RSA Root bằng các phần cứng bảo mật chuyên dụng chuẩn FIPS 140-2 (như AWS KMS, HashiCorp Vault). Hàm `load_ca()` sẽ thực thi gọi API mã hóa KMS thay vì tải bộ nhớ RAM cục bộ.
 - **Mutual TLS (mTLS) nội bộ:** Để khắc phục hạn chế 2, thay vì giao tiếp RPC Plaintext giữa các Service nội bộ (CA gọi KDS), yêu cầu bắt buộc Client/Server handshake có chứng chỉ xác thực hai chiều mTLS.
 - **Hoàn thiện giao thức ECDH Diffie-Hellman:** File mã nguồn `crypto/ecdh_handler.py` hiện đã hoàn thiện thư viện X25519 cho phép trao đổi Perfect Forward Secrecy. Cần tích hợp mô đun này vào giao thức STARTTLS của `smtp_client` và `smtp_server` thay thế cho thuật toán chèn `Pre-master` tĩnh bằng RSA-OAEP hiện tại, qua đó ngăn chặn các rủi ro bị bẻ khóa hồi tố (Retrospective Decryption) nếu Private Key của máy chủ Mail bị đánh cắp trong tương lai.
+
+---
+
+## 9. KIẾN TRÚC HAI CẶP KHÓA (DUAL KEY PAIR - v2.1)
+
+### 9.1 Bối cảnh và động cơ
+
+Phiên bản gốc sử dụng **một cặp khóa RSA-2048 duy nhất** cho cả hai mục đích ký số và mã hóa. Điều này tạo ra **mâu thuẫn kiến trúc nghiêm trọng**:
+
+- **Non-repudiation** yêu cầu khóa ký **KHÔNG BAO GIỜ** được ký quỹ (escrow). Nếu CA có thể khôi phục khóa ký, CA cũng có thể giả mạo chữ ký người dùng.
+- **Key Recovery** yêu cầu khóa giải mã **CÓ THỂ** được ký quỹ để tránh mất dữ liệu khi mất thiết bị.
+
+### 9.2 Giải pháp: Dual Key Pair theo RFC 5280
+
+Mỗi người dùng có **hai cặp khóa RSA-2048 độc lập** với các KeyUsage extension X.509 khác nhau:
+
+| | Khóa Ký (Signing Key) | Khóa Mã hóa (Encryption Key) |
+|---|---|---|
+| **KeyUsage** | digitalSignature, contentCommitment | keyEncipherment, dataEncipherment |
+| **Ký quỹ?** | ❌ KHÔNG BAO GIỜ | ✅ Shamir 2-of-3 |
+| **Tự động khôi phục?** | ❌ Không | ✅ Có khi đăng nhập |
+| **Nếu mất** | Phải đăng ký lại | Tự động phục hồi từ server |
+| **File local** | *.sign_key.pem, *.sign_cert.pem | *.enc_key.pem, *.enc_cert.pem |
+
+### 9.3 Luồng ký số và mã hóa sau cải tiến
+
+**Gửi thư:**
+1. sign_privkey → RSA-PSS ký plaintext → sig
+2. Lấy enc_cert của người nhận từ KDS (cert_type='enc')
+3. enc_pub_recipient → RSA-OAEP mã hóa CEK → cek_enc
+4. AES-CBC(CEK, body + sig + sign_cert) → ct
+
+**Nhận thư:**
+1. enc_privkey → RSA-OAEP giải mã CEK
+2. AES-CBC giải mã → body + sig + sign_cert
+3. sign_cert.pubkey → RSA-PSS xác minh sig trên ody
+
+### 9.4 Thay đổi database
+
+`sql
+-- kds.certs được mở rộng với khóa phức hợp
+ALTER TABLE kds.certs ADD cert_type VARCHAR(10) NOT NULL DEFAULT 'sign';
+ALTER TABLE kds.certs ADD CONSTRAINT CK_cert_type CHECK (cert_type IN ('sign', 'enc'));
+-- Primary key đổi thành (email, cert_type)
+`
+
+### 9.5 Đảm bảo Non-repudiation
+
+Vì khóa ký được tạo trên thiết bị và không bao giờ rời khỏi thiết bị, không có bên nào (kể cả CA, KDS, hay quản trị viên hệ thống) có thể giả mạo chữ ký của người dùng. Đây là định nghĩa tiêu chuẩn của non-repudiation theo RFC 5280.
+
+### 9.6 Files được sửa đổi trong v2.1
+
+| File | Thay đổi chính |
+|---|---|
+| securemail_sqlserver.sql | cert_type column + composite PK |
+| ca_service/ca_core.py | key_usage param → KeyUsage extension |
+| ca_service/ca_server.py | Truyền key_usage từ JSON |
+| kds/key_store.py | put_cert/get_sign_cert/get_enc_cert |
+| kds/kds_server.py | API dual cert ops |
+| kds/kds_client.py | Client dual cert functions |
+| client_core.py | register/login/send dual keypair logic |
+| mail/smime_handler.py | Viết lại hoàn toàn cho dual keys |
+| gui/app.py | Security tab, friendly_error, _inspect_identity |
+| 
+un_demo.py | scenario_7 escrow only enc_key |
+| interactive_demo.py | Dual keypair compatibility |
+| 	ests/test_dual_keypair.py | Unit tests mới |

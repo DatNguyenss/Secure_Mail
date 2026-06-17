@@ -1697,28 +1697,38 @@ class SecureMailApp(tk.Tk):
         cert_inner.pack(fill="both", expand=True, padx=18, pady=18)
         tk.Label(cert_inner, text="Local Identity", bg=COLORS["surface"], fg=COLORS["text"],
                  font=("Segoe UI Semibold", 14)).pack(anchor="w")
-        email_var = tk.StringVar(value=self.state_data.email or "")
-        self._field_with_var(cert_inner, "Email", email_var)
+        email_var = tk.StringVar(value=self.state_data.email or "Please login first")
+        cert_email_entry = self._field_with_var(cert_inner, "Email", email_var)
+        cert_email_entry.config(state="readonly")
         ttk.Button(cert_inner, text="Inspect local cert/key", style="Primary.TButton",
-                   command=lambda: self._inspect_identity(email_var.get().strip())).pack(anchor="w", pady=12)
+                   command=lambda: self._inspect_identity(self.state_data.email)).pack(anchor="w", pady=12)
 
         recovery_card = self._surface(grid)
         recovery_card.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
         recovery_inner = tk.Frame(recovery_card, bg=COLORS["surface"])
         recovery_inner.pack(fill="both", expand=True, padx=18, pady=18)
-        tk.Label(recovery_inner, text="Key Recovery", bg=COLORS["surface"], fg=COLORS["text"],
+        tk.Label(recovery_inner, text="Encryption Key Recovery", bg=COLORS["surface"], fg=COLORS["text"],
                  font=("Segoe UI Semibold", 14)).pack(anchor="w")
-        rec_email_var = tk.StringVar(value=self.state_data.email or "")
-        self._field_with_var(recovery_inner, "Email", rec_email_var)
-        tk.Label(recovery_inner, text="Shares", bg=COLORS["surface"], fg=COLORS["muted"]).pack(anchor="w", pady=(10, 3))
+        tk.Label(
+            recovery_inner,
+            text=(α := "Chỉ phục hồi được ENCRYPTION KEY (dùng Shamir escrow).\n"
+                  "SIGNING KEY không bao giờ được escrow để đảm bảo non-repudiation.\n"
+                  "Nếu mất signing key, vui lòng đăng ký lại tài khoản."),
+            bg=COLORS["surface"], fg=COLORS["muted"], font=("Segoe UI", 9),
+            wraplength=280, justify="left",
+        ).pack(anchor="w", pady=(4, 0))
+        rec_email_var = tk.StringVar(value=self.state_data.email or "Please login first")
+        rec_email_entry = self._field_with_var(recovery_inner, "Email", rec_email_var)
+        rec_email_entry.config(state="readonly")
+        tk.Label(recovery_inner, text="Shares (chọn đúng 2 trong 3)", bg=COLORS["surface"], fg=COLORS["muted"]).pack(anchor="w", pady=(10, 3))
         share_frame = tk.Frame(recovery_inner, bg=COLORS["surface"])
         share_frame.pack(anchor="w")
         s1 = tk.BooleanVar(value=True)
         s2 = tk.BooleanVar(value=True)
         s3 = tk.BooleanVar(value=False)
-        for text, var in (("1", s1), ("2", s2), ("3", s3)):
+        for text, var in (("Share 1", s1), ("Share 2", s2), ("Share 3", s3)):
             ttk.Checkbutton(share_frame, text=text, variable=var).pack(side="left", padx=(0, 12))
-        ttk.Button(recovery_inner, text="Recover private key", style="Primary.TButton",
+        ttk.Button(recovery_inner, text="Recover Encryption Key", style="Primary.TButton",
                    command=lambda: self._recover_key(rec_email_var.get().strip(), [v for v, b in ((1, s1), (2, s2), (3, s3)) if b.get()])).pack(anchor="w", pady=12)
 
         self._inspect_identity(email_var.get().strip(), silent=True)
@@ -1733,32 +1743,50 @@ class SecureMailApp(tk.Tk):
         if not email:
             return
         safe = email.replace("@", "_at_")
-        key_path = PROJECT_ROOT / "data" / "users" / f"{safe}.key.pem"
-        cert_path = PROJECT_ROOT / "data" / "users" / f"{safe}.cert.pem"
-        salt_path = PROJECT_ROOT / "data" / "users" / f"{safe}.salt.bin"
+        base = PROJECT_ROOT / "data" / "users"
+        sign_key_path  = base / f"{safe}.sign_key.pem"
+        sign_cert_path = base / f"{safe}.sign_cert.pem"
+        enc_key_path   = base / f"{safe}.enc_key.pem"
+        enc_cert_path  = base / f"{safe}.enc_cert.pem"
+        salt_path      = base / f"{safe}.salt.bin"
+        legacy_key  = base / f"{safe}.key.pem"
+        legacy_cert = base / f"{safe}.cert.pem"
+
         lines = [
-            f"Key file: {'FOUND' if key_path.exists() else 'MISSING'} - {key_path}",
-            f"Cert file: {'FOUND' if cert_path.exists() else 'MISSING'} - {cert_path}",
-            f"Salt file: {'FOUND' if salt_path.exists() else 'MISSING'} - {salt_path}",
+            f"=== Dual Key Pair: {email} ===",
+            f"[SIGN] Key:  {'FOUND' if sign_key_path.exists() else 'MISSING'}",
+            f"[SIGN] Cert: {'FOUND' if sign_cert_path.exists() else 'MISSING'}",
+            f"[ENC]  Key:  {'FOUND' if enc_key_path.exists() else 'MISSING'}",
+            f"[ENC]  Cert: {'FOUND' if enc_cert_path.exists() else 'MISSING'}",
+            f"Salt:        {'FOUND' if salt_path.exists() else 'MISSING'}",
         ]
+        if legacy_key.exists():
+            lines.append("[Legacy] key.pem found -- please re-register for dual keypair")
         for line in lines:
             self._append_log(line)
-        if cert_path.exists():
+
+        for label, cert_path in (("SIGN", sign_cert_path), ("ENC", enc_cert_path)):
+            if cert_path.exists():
+                try:
+                    cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
+                    cert_lines = [
+                        f"[{label}] Subject: {cert.subject.rfc4514_string()}",
+                        f"[{label}] Serial:  {hex(cert.serial_number)}",
+                        f"[{label}] Valid:   {cert.not_valid_before_utc} -> {cert.not_valid_after_utc}",
+                    ]
+                    lines.extend(cert_lines)
+                    for line in cert_lines:
+                        self._append_log(line)
+                except Exception as exc:
+                    lines.append(f"[{label}] Cannot parse cert: {exc}")
+        if not sign_cert_path.exists() and legacy_cert.exists():
             try:
-                cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
-                cert_lines = [
-                    f"Subject: {cert.subject.rfc4514_string()}",
-                    f"Issuer: {cert.issuer.rfc4514_string()}",
-                    f"Serial: {hex(cert.serial_number)}",
-                    f"Valid: {cert.not_valid_before_utc} -> {cert.not_valid_after_utc}",
-                ]
-                lines.extend(cert_lines)
-                for line in cert_lines:
+                cert = x509.load_pem_x509_certificate(legacy_cert.read_bytes())
+                for line in [f"[Legacy] Serial: {hex(cert.serial_number)}"]:
+                    lines.append(line)
                     self._append_log(line)
-            except Exception as exc:
-                line = f"Cannot parse cert: {exc}"
-                lines.append(line)
-                self._append_log(line)
+            except Exception:
+                pass
         if not silent:
             messagebox.showinfo("SecureMail Identity", "\n".join(lines))
 
@@ -2416,6 +2444,30 @@ def friendly_error(exc: BaseException) -> str:
         return "Certificate has been revoked."
     if "incorrect password" in lower or "wrong password" in lower:
         return "Sai email/password hoac local key khong khop. Vui long kiem tra thong tin dang nhap."
+    if "nonetype" in lower and "decrypt" in lower:
+        return (
+            "Key Mismatch: Không tìm thấy khóa riêng tư tương ứng. "
+            "Hãy đăng xuất và đăng nhập lại để hệ thống tự động phục hồi khóa."
+        )
+    if "key mismatch" in lower or "mismatch" in lower:
+        return (
+            "Khóa riêng tư local không khớp với chứng chỉ trên KDS. "
+            "Hãy đăng xuất và đăng nhập lại để tự động đồng bộ."
+        )
+    if "sign_key_missing" in lower or "sign key" in lower and "missing" in lower:
+        return (
+            "Signing key không tìm thấy trên thiết bị này. "
+            "Signing key KHÔNG thể khôi phục từ server (non-repudiation). "
+            "Vui lòng đăng ký lại tài khoản hoặc khôi phục file sign_key.pem từ backup."
+        )
+    if "sign_key_corrupt" in lower:
+        return "Signing key bị hỏng. Vui lòng đăng ký lại hoặc restore từ backup."
+    if "enc_key_missing" in lower or "enc_key_mismatch" in lower:
+        return (
+            "Encryption key không tìm thấy hoặc không khớp. "
+            "Hệ thống sẽ tự động khôi phục từ Shamir escrow. "
+            "Nếu thất bại, dùng tính năng 'Recover Encryption Key' trong Security tab."
+        )
     if "decrypt" in lower:
         return "Login/decryption failed. Check password or recovered private key."
     if "login failed" in lower:

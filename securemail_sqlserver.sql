@@ -94,17 +94,61 @@ GO
 -- 2. KEY DISTRIBUTION SERVER (KDS)
 -- =========================================================================
 
--- Table: kds.certs (Public key registry)
+-- Table: kds.certs (Public key registry — supports dual cert types per user)
 IF OBJECT_ID('kds.certs', 'U') IS NULL
 BEGIN
     CREATE TABLE kds.certs (
-        email VARCHAR(256) NOT NULL CONSTRAINT PK_kds_certs PRIMARY KEY,
+        email VARCHAR(256) NOT NULL,
+        cert_type VARCHAR(10) NOT NULL CONSTRAINT DF_kds_certs_cert_type DEFAULT 'sign',
         serial VARCHAR(64) NOT NULL,
         cert_pem VARBINARY(MAX) NOT NULL,
-        registered_at DATETIMEOFFSET NOT NULL CONSTRAINT DF_kds_certs_registered_at DEFAULT SYSDATETIMEOFFSET()
+        registered_at DATETIMEOFFSET NOT NULL CONSTRAINT DF_kds_certs_registered_at DEFAULT SYSDATETIMEOFFSET(),
+        CONSTRAINT PK_kds_certs PRIMARY KEY (email, cert_type),
+        CONSTRAINT CK_kds_certs_cert_type CHECK (cert_type IN ('sign', 'enc'))
     );
+    CREATE INDEX idx_kds_certs_email ON kds.certs(email);
+END
+ELSE
+BEGIN
+    -- Migration: add cert_type column if upgrading from single-keypair schema
+    IF NOT EXISTS (
+        SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA='kds' AND TABLE_NAME='certs' AND COLUMN_NAME='cert_type'
+    )
+    BEGIN
+        -- Step 1: Drop old PRIMARY KEY on email
+        DECLARE @pk_name NVARCHAR(200);
+        SELECT @pk_name = name FROM sys.key_constraints
+        WHERE type = 'PK' AND parent_object_id = OBJECT_ID('kds.certs');
+        IF @pk_name IS NOT NULL
+            EXEC('ALTER TABLE kds.certs DROP CONSTRAINT ' + @pk_name);
+
+        -- Step 2: Add cert_type column with default
+        ALTER TABLE kds.certs
+            ADD cert_type VARCHAR(10) NOT NULL
+            CONSTRAINT DF_kds_certs_cert_type DEFAULT 'sign'
+            WITH VALUES;
+
+        -- Step 3: Add check constraint
+        ALTER TABLE kds.certs
+            ADD CONSTRAINT CK_kds_certs_cert_type CHECK (cert_type IN ('sign', 'enc'));
+
+        -- Step 4: Add new composite PK
+        ALTER TABLE kds.certs
+            ADD CONSTRAINT PK_kds_certs PRIMARY KEY (email, cert_type);
+
+        -- Step 5: Add index on email for fast lookups
+        IF NOT EXISTS (
+            SELECT 1 FROM sys.indexes WHERE name='idx_kds_certs_email'
+              AND object_id = OBJECT_ID('kds.certs')
+        )
+            CREATE INDEX idx_kds_certs_email ON kds.certs(email);
+
+        PRINT '[Migration] kds.certs upgraded to dual-cert schema (email, cert_type)';
+    END
 END
 GO
+
 
 -- Table: kds.crl_cache (Cached Certificate Revocation List)
 IF OBJECT_ID('kds.crl_cache', 'U') IS NULL

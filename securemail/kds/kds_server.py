@@ -1,12 +1,14 @@
 """KDS — cổng 9001. Tra cứu cert & phân phối CRL.
 
 Endpoints:
-  kds.put_cert     { email, serial_hex, cert_pem_b64 }   (CA-only trong demo)
-  kds.get_cert     { email }                             → { cert_pem_b64 }
-  kds.bulk         { emails: [...] }                     → { certs: {email: cert_b64} }
-  kds.sync_crl     { crl_pem_b64 }                       (CA push)
-  kds.get_crl      {}                                    → { crl_pem_b64 }
-  kds.list_emails  {}                                    → { emails: [...] }
+  kds.put_cert       { email, serial_hex, cert_pem_b64, [cert_type] }  (CA-only)
+  kds.get_cert       { email }             → { cert_pem_b64 }  (alias: signing cert)
+  kds.get_sign_cert  { email }             → { cert_pem_b64, serial }
+  kds.get_enc_cert   { email }             → { cert_pem_b64, serial }
+  kds.bulk           { emails: [...] }     → { certs: {email: {sign, enc}} }
+  kds.sync_crl       { crl_pem_b64 }       (CA push)
+  kds.get_crl        {}                    → { crl_pem_b64 }
+  kds.list_emails    {}                    → { emails: [...] }
 """
 import socket
 import threading
@@ -24,36 +26,70 @@ def _handle(conn: socket.socket, addr):
     try:
         req = recv_json(conn)
         op = req.get("op")
+
         if op == "kds.put_cert":
-            key_store.put_cert(req["email"], req["serial_hex"], unb64(req["cert_pem_b64"]))
+            key_store.put_cert(
+                req["email"], req["serial_hex"], unb64(req["cert_pem_b64"]),
+                cert_type=req.get("cert_type", "sign"),
+            )
             send_json(conn, {"ok": True})
+
         elif op == "kds.get_cert":
-            rec = key_store.get_cert(req["email"])
+            # Backward-compatible: returns the signing cert
+            rec = key_store.get_sign_cert(req["email"])
             if not rec:
                 send_json(conn, {"ok": False, "error": "not found"})
             else:
                 send_json(conn, {"ok": True, "cert_pem_b64": b64(rec["cert_pem"]),
                                  "serial": rec["serial"]})
+
+        elif op == "kds.get_sign_cert":
+            rec = key_store.get_sign_cert(req["email"])
+            if not rec:
+                send_json(conn, {"ok": False, "error": "not found"})
+            else:
+                send_json(conn, {"ok": True, "cert_pem_b64": b64(rec["cert_pem"]),
+                                 "serial": rec["serial"]})
+
+        elif op == "kds.get_enc_cert":
+            rec = key_store.get_enc_cert(req["email"])
+            if not rec:
+                send_json(conn, {"ok": False, "error": "not found"})
+            else:
+                send_json(conn, {"ok": True, "cert_pem_b64": b64(rec["cert_pem"]),
+                                 "serial": rec["serial"]})
+
         elif op == "kds.bulk":
             out = {}
             for e in req["emails"]:
-                rec = key_store.get_cert(e)
-                if rec:
-                    out[e] = b64(rec["cert_pem"])
+                sign_rec = key_store.get_sign_cert(e)
+                enc_rec  = key_store.get_enc_cert(e)
+                entry = {}
+                if sign_rec:
+                    entry["sign"] = b64(sign_rec["cert_pem"])
+                if enc_rec:
+                    entry["enc"]  = b64(enc_rec["cert_pem"])
+                if entry:
+                    out[e] = entry
             send_json(conn, {"ok": True, "certs": out})
+
         elif op == "kds.sync_crl":
             key_store.put_crl(unb64(req["crl_pem_b64"]))
             send_json(conn, {"ok": True})
+
         elif op == "kds.get_crl":
             crl = key_store.get_crl()
             if crl is None:
                 send_json(conn, {"ok": False, "error": "no crl yet"})
             else:
                 send_json(conn, {"ok": True, "crl_pem_b64": b64(crl)})
+
         elif op == "kds.list_emails":
             send_json(conn, {"ok": True, "emails": key_store.list_emails()})
+
         else:
             send_json(conn, {"ok": False, "error": f"unknown op: {op}"})
+
     except Exception as e:
         traceback.print_exc()
         try:

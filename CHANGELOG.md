@@ -3,6 +3,39 @@
 > Mỗi lần thay đổi sẽ được ghi theo thứ tự thời gian mới nhất ở trên.
 ---
 
+## [2026-06-17] -- Dual Key Pair Architecture Refactor (v2.1)
+
+### Muc tieu
+Phan tach hai cap khoa RSA-2048 rieng biet theo RFC 5280 va S/MIME enterprise:
+- **Signing Key** (sign_key.pem, sign_cert.pem): chi dung ky so, KHONG bao gio escrow.
+- **Encryption Key** (enc_key.pem, enc_cert.pem): chi dung ma hoa CEK, escrow Shamir 2-of-3.
+
+### File thay doi
+- securemail_sqlserver.sql: Them cot cert_type + composite PK (email, cert_type) cho kds.certs.
+- securemail/ca_service/ca_core.py: sign_csr() nhan key_usage param, tao KeyUsage extension dung cach.
+- securemail/ca_service/ca_server.py: Truyen key_usage tu request JSON xuong ca_core.
+- securemail/kds/key_store.py: put_cert/get_sign_cert/get_enc_cert ho tro dual cert type.
+- securemail/kds/kds_server.py: Expose get_sign_cert / get_enc_cert / bulk dual ops.
+- securemail/kds/kds_client.py: get_sign_cert, get_enc_cert, bulk_get tra dict dual.
+- securemail/client_core.py:
+  - register() tao 2 keypair, ky 2 CSR, push 2 cert, escrow chi enc_key.
+  - login() tai sign_key + enc_key, auto-recover enc_key tu escrow neu mat/mismatch.
+  - sign_key KHONG auto-recover tu server (bao dam non-repudiation).
+  - send_secure_email() dung enc_cert cua nguoi nhan de ma hoa CEK.
+  - open_envelope() dung enc_privkey de giai ma.
+- securemail/mail/smime_handler.py: Viet lai hoan toan cho dual keypair.
+- securemail/gui/app.py: _inspect_identity hien thi ca sign + enc cert; friendly_error xu ly sign_key_missing.
+- securemail/README.md: Them muc Dual Key Pair Architecture.
+- securemail/tests/test_dual_keypair.py: Unit tests cho KeyUsage, S/MIME, escrow.
+
+### Bao dam bao mat
+- Non-repudiation: sign_key khong bao gio roi thiet bi.
+- Key Recovery: enc_key co the phuc hoi tu 2-of-3 Shamir shares.
+- Phan ly: ke tan cong escrow DB chi lay duoc enc_key, khong the gia mao chu ky.
+
+---
+
+
 ## 🛠️ DANH SÁCH LỆNH CỦA MAIL CLIENT (COMMAND REFERENCE)
 
 Dưới đây là danh sách toàn bộ các lệnh được hỗ trợ bởi Mail Client trong cả hai chế độ:

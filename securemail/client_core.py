@@ -181,77 +181,133 @@ def require_recovery_authorized(actor_ctx: dict | None, target_email: str):
 
 
 def escrow_local_user_keys() -> list[str]:
-    """Create/update escrow shares for every local private key file."""
+    """Create/update escrow shares for every local ENCRYPTION private key file.
+
+    Signing keys are intentionally excluded — they must never be escrowed
+    to preserve non-repudiation guarantees.
+    """
     from securemail.ca_service import key_escrow
 
     USER_DIR.mkdir(parents=True, exist_ok=True)
     escrowed: list[str] = []
-    suffix = ".key.pem"
-    for key_path in sorted(USER_DIR.glob(f"*{suffix}")):
-        safe_name = key_path.name[:-len(suffix)]
+    enc_suffix = ".enc_key.pem"
+    for key_path in sorted(USER_DIR.glob(f"*{enc_suffix}")):
+        safe_name = key_path.name[:-len(enc_suffix)]
         email = safe_name.replace("_at_", "@")
         key_escrow.escrow_key(email, key_path.read_bytes())
         escrowed.append(email)
     return escrowed
 
 
-def register(email: str, password: str, display_name: str = "", role: str = "user"):
-    """Đăng ký user mới: tạo keypair, CSR → CA → cert, push KDS, đăng ký tại Ticket Service.
+def register(email: str, password: str, display_name: str = "", role: str = "user",
+             force: bool = False):
+    """Register a new user with DUAL keypairs (signing + encryption).
 
-    Store locally: cert.pem + encrypted_key.pem + salt.bin
+    Signing keypair  → stays on device, never escrowed (non-repudiation).
+    Encryption keypair → escrowed via Shamir 2-of-3 for key recovery.
+
+    Local files saved:
+      {email}.sign_key.pem, {email}.sign_cert.pem
+      {email}.enc_key.pem,  {email}.enc_cert.pem
+      {email}.salt.bin
+
+    Args:
+        force: If True, allow re-registration over existing account (demo/admin only).
     """
     email = email.strip().lower()
     role = _normalize_role(role)
     USER_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 1. Generate RSA keypair
-    priv = rsa_handler.generate_keypair(2048)
+    # Guard: block silent re-registration
+    if not force:
+        try:
+            existing_cert = kds_client.get_cert(email)
+        except Exception:
+            existing_cert = None
+        if existing_cert:
+            raise ValueError(
+                f"Tài khoản '{email}' đã tồn tại trong hệ thống. "
+                "Vui lòng đăng nhập (Login). Nếu mất khóa, dùng 'Recovery Key' "
+                "trong phần Security."
+            )
 
-    # 2. Build CSR
-    csr = (
-        x509.CertificateSigningRequestBuilder()
-        .subject_name(x509.Name([
-            x509.NameAttribute(NameOID.COMMON_NAME, display_name or email),
-            x509.NameAttribute(NameOID.EMAIL_ADDRESS, email),
-        ]))
-        .add_extension(
-            x509.SubjectAlternativeName([x509.RFC822Name(email)]),
-            critical=False,
-        )
-        .sign(priv, hashes.SHA256())
-    )
-    csr_pem = csr.public_bytes(serialization.Encoding.PEM)
+    def _build_csr(priv, cn: str, email_addr: str):
+        return (
+            x509.CertificateSigningRequestBuilder()
+            .subject_name(x509.Name([
+                x509.NameAttribute(NameOID.COMMON_NAME, cn),
+                x509.NameAttribute(NameOID.EMAIL_ADDRESS, email_addr),
+            ]))
+            .add_extension(
+                x509.SubjectAlternativeName([x509.RFC822Name(email_addr)]),
+                critical=False,
+            )
+            .sign(priv, hashes.SHA256())
+        ).public_bytes(serialization.Encoding.PEM)
 
-    # 3. Send to CA
-    resp = request("127.0.0.1", 9000, {
-        "op": "ca.sign_csr", "csr_pem_b64": b64(csr_pem), "email": email,
+    cn = display_name or email
+
+    # 1. Generate SIGNING keypair
+    sign_priv = rsa_handler.generate_keypair(2048)
+    sign_csr_pem = _build_csr(sign_priv, cn, email)
+
+    # 2. Generate ENCRYPTION keypair
+    enc_priv = rsa_handler.generate_keypair(2048)
+    enc_csr_pem = _build_csr(enc_priv, cn, email)
+
+    # 3. Issue signing cert from CA (key_usage='sign')
+    sign_resp = request("127.0.0.1", 9000, {
+        "op": "ca.sign_csr", "csr_pem_b64": b64(sign_csr_pem),
+        "email": email, "key_usage": "sign",
     })
-    if not resp.get("ok"):
-        raise RuntimeError(f"CA refused: {resp.get('error')}")
-    cert_pem = unb64(resp["cert_pem_b64"])
-    cert = x509.load_pem_x509_certificate(cert_pem)
-    serial_hex = hex(cert.serial_number)
+    if not sign_resp.get("ok"):
+        raise RuntimeError(f"CA refused signing cert: {sign_resp.get('error')}")
+    sign_cert_pem = unb64(sign_resp["cert_pem_b64"])
+    sign_serial = hex(x509.load_pem_x509_certificate(sign_cert_pem).serial_number)
 
-    # 4. Push cert to KDS
-    kds_client.put_cert(email, serial_hex, cert_pem)
+    # 4. Issue encryption cert from CA (key_usage='enc')
+    enc_resp = request("127.0.0.1", 9000, {
+        "op": "ca.sign_csr", "csr_pem_b64": b64(enc_csr_pem),
+        "email": email, "key_usage": "enc",
+    })
+    if not enc_resp.get("ok"):
+        raise RuntimeError(f"CA refused encryption cert: {enc_resp.get('error')}")
+    enc_cert_pem = unb64(enc_resp["cert_pem_b64"])
+    enc_serial = hex(x509.load_pem_x509_certificate(enc_cert_pem).serial_number)
 
-    # 5. Register principal at Ticket Service (Kc derived from password)
+    # 5. Push both certs to KDS
+    kds_client.put_cert(email, sign_serial, sign_cert_pem, cert_type="sign")
+    kds_client.put_cert(email, enc_serial,  enc_cert_pem,  cert_type="enc")
+
+    # 6. Register principal at Ticket Service
     salt, kc = password_hash(password, None)
     ts_client.register(email, salt, kc, role)
 
-    # 6. Save locally
-    priv_pem = rsa_handler.serialize_private_pem(priv, password.encode("utf-8"))
-    _user_path(email, "key.pem").write_bytes(priv_pem)
-    _user_path(email, "cert.pem").write_bytes(cert_pem)
+    # 7. Save both keypairs locally (password-encrypted)
+    pw_bytes = password.encode("utf-8")
+    sign_priv_pem = rsa_handler.serialize_private_pem(sign_priv, pw_bytes)
+    enc_priv_pem  = rsa_handler.serialize_private_pem(enc_priv,  pw_bytes)
+
+    _user_path(email, "sign_key.pem").write_bytes(sign_priv_pem)
+    _user_path(email, "sign_cert.pem").write_bytes(sign_cert_pem)
+    _user_path(email, "enc_key.pem").write_bytes(enc_priv_pem)
+    _user_path(email, "enc_cert.pem").write_bytes(enc_cert_pem)
     _user_path(email, "salt.bin").write_bytes(salt)
 
-    # Escrow the password-protected private key so any registered user can
-    # recover their local key file later with 2-of-3 Shamir shares.
+    # 8. Escrow ONLY the encryption key (signing key must NEVER be escrowed)
     from securemail.ca_service import key_escrow
-    key_escrow.escrow_key(email, priv_pem)
+    key_escrow.escrow_key(email, enc_priv_pem)
 
-    print(f"[REG] Registered {email} — serial={serial_hex}")
-    return {"email": email, "role": role, "cert_pem": cert_pem, "serial": serial_hex}
+    print(f"[REG] Registered {email}")
+    print(f"  sign_serial={sign_serial}  enc_serial={enc_serial}")
+    return {
+        "email": email, "role": role,
+        "sign_cert_pem": sign_cert_pem, "sign_serial": sign_serial,
+        "enc_cert_pem":  enc_cert_pem,  "enc_serial":  enc_serial,
+        # Backward-compat aliases
+        "cert_pem": sign_cert_pem, "serial": sign_serial,
+    }
+
 
 
 def public_register(email: str, password: str, display_name: str = ""):
@@ -269,11 +325,13 @@ def account_exists(email: str) -> bool:
     normalized = email.strip().lower()
     if not normalized:
         return False
-    for suffix in ("key.pem", "cert.pem", "salt.bin"):
+    # Check new dual-key local files first, then fall back to old single-key file
+    for suffix in ("sign_key.pem", "enc_key.pem", "key.pem", "cert.pem", "salt.bin"):
         if _user_path(normalized, suffix).exists():
             return True
     try:
-        if kds_client.get_cert(normalized):
+        # Check either cert type in KDS
+        if kds_client.get_sign_cert(normalized) or kds_client.get_enc_cert(normalized):
             return True
     except Exception:
         pass
@@ -383,53 +441,167 @@ def _lookup_principal_role(email: str) -> str | None:
 
 
 def login(email: str, password: str) -> dict:
-    """AS-REQ → get TGT. Also attempt to load local private key.
+    """AS-REQ → TGT. Load both signing and encryption private keys.
 
-    Authentication with the Ticket Service is performed first.  If the
-    local private key is missing or corrupted the login still succeeds
-    but ``privkey`` will be ``None`` and ``key_status`` will indicate
-    the reason (``"missing"`` or ``"corrupt"``).  The caller / UI can
-    then offer a restricted mode where the user can recover their key.
+    - Sign key (sign_key.pem): loaded from local only. If missing, key_status='sign_key_missing'.
+      NO auto-recovery from server — signing key must NEVER leave the device.
+    - Enc key (enc_key.pem): loaded from local. If missing/mismatched vs KDS enc cert,
+      auto-recovery from Shamir escrow is attempted.
 
-    Returns ctx = {email, privkey, cert_pem, tgt, k_c_tgs, key_status}.
+    Returns ctx with dual-key fields plus backward-compat aliases:
+      sign_privkey, enc_privkey, sign_cert_pem, enc_cert_pem,
+      privkey (alias sign_privkey), cert_pem (alias sign_cert_pem)
     """
-    # 1. Authenticate with Ticket Service first — this only needs the
-    #    password (Kc derived from password), not the local key file.
+    # 1. Authenticate with Ticket Service
     as_resp = ts_client.as_request(email, password)
+    pw_bytes = password.encode("utf-8")
 
-    # 2. Attempt to load local key material.  Failures are non-fatal.
-    privkey = None
-    cert_pem = b""
-    key_status = "ok"
-
+    # 2. Fetch authoritative certs from KDS
     try:
-        cert_pem = _user_path(email, "cert.pem").read_bytes()
-    except FileNotFoundError:
-        pass
+        sign_cert_pem = kds_client.get_sign_cert(email) or b""
+    except Exception:
+        sign_cert_pem = b""
+    try:
+        enc_cert_pem = kds_client.get_enc_cert(email) or b""
+    except Exception:
+        enc_cert_pem = b""
 
-    key_path = _user_path(email, "key.pem")
-    if not key_path.exists():
-        key_status = "missing"
-        print(f"[Login] Private key file not found for {email}. "
-              f"Entering restricted mode — use Security / Recovery to restore.")
-    else:
+    # Sync local cert files from KDS
+    for suffix, pem in (("sign_cert.pem", sign_cert_pem), ("enc_cert.pem", enc_cert_pem)):
+        if pem:
+            try:
+                _user_path(email, suffix).write_bytes(pem)
+            except Exception:
+                pass
+
+    # Fallback: read local cert files if KDS unreachable
+    if not sign_cert_pem:
         try:
-            key_pem = key_path.read_bytes()
-            privkey = rsa_handler.load_private_pem(key_pem, password.encode("utf-8"))
+            sign_cert_pem = _user_path(email, "sign_cert.pem").read_bytes()
+        except FileNotFoundError:
+            pass
+    if not enc_cert_pem:
+        try:
+            enc_cert_pem = _user_path(email, "enc_cert.pem").read_bytes()
+        except FileNotFoundError:
+            pass
+
+    # 3. Helper functions
+    def _try_load_key(pem: bytes):
+        try:
+            return rsa_handler.load_private_pem(pem, pw_bytes)
+        except Exception:
+            return None
+
+    def _key_matches_cert(priv_key, cert_pem_bytes: bytes) -> bool:
+        if not priv_key or not cert_pem_bytes:
+            return False
+        try:
+            cert = x509.load_pem_x509_certificate(cert_pem_bytes)
+            cert_pub = cert.public_key().public_bytes(
+                serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+            )
+            local_pub = priv_key.public_key().public_bytes(
+                serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+            )
+            return cert_pub == local_pub
+        except Exception:
+            return False
+
+    def _auto_recover_enc() -> object | None:
+        """Recover enc_key from Shamir escrow and write to disk."""
+        from securemail.ca_service import key_escrow
+        try:
+            recovered_pem = key_escrow.recover_key(email, [1, 2])
+            recovered = _try_load_key(recovered_pem)
+            if recovered and _key_matches_cert(recovered, enc_cert_pem):
+                enc_path = _user_path(email, "enc_key.pem")
+                if enc_path.exists():
+                    bak = enc_path.with_suffix(
+                        f".pem.bak.{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    )
+                    enc_path.rename(bak)
+                    print(f"[Login] Old enc key backed up to {bak}")
+                enc_path.parent.mkdir(parents=True, exist_ok=True)
+                enc_path.write_bytes(recovered_pem)
+                print(f"[Login] Auto-recovered enc_key for {email} from escrow.")
+                return recovered
+            print(f"[Login] Escrow enc_key did not match KDS enc cert for {email}.")
+            return None
         except Exception as exc:
-            key_status = "corrupt"
-            print(f"[Login] Cannot load private key for {email}: {exc}. "
-                  f"Entering restricted mode — use Security / Recovery to restore.")
+            print(f"[Login] Escrow auto-recovery failed for {email}: {exc}")
+            return None
+
+    # 4. Load SIGNING key (never auto-recover from server)
+    sign_privkey = None
+    sign_key_status = "ok"
+    sign_key_path = _user_path(email, "sign_key.pem")
+    if not sign_key_path.exists():
+        sign_key_status = "sign_key_missing"
+        print(f"[Login] Signing key missing for {email}. "
+              "Non-repudiation: cannot recover from server. "
+              "Outgoing email will fail until key is restored.")
+    else:
+        sign_privkey = _try_load_key(sign_key_path.read_bytes())
+        if sign_privkey is None:
+            sign_key_status = "sign_key_corrupt"
+            print(f"[Login] Cannot load signing key for {email}.")
+
+    # 5. Load ENCRYPTION key (auto-recover from escrow if missing/mismatched)
+    enc_privkey = None
+    enc_key_status = "ok"
+    enc_key_path = _user_path(email, "enc_key.pem")
+    if not enc_key_path.exists():
+        enc_key_status = "enc_key_missing"
+        print(f"[Login] Enc key missing for {email}. Attempting auto-recovery...")
+        enc_privkey = _auto_recover_enc()
+        if enc_privkey:
+            enc_key_status = "ok"
+        else:
+            print(f"[Login] Auto-recovery failed. Cannot decrypt incoming mail.")
+    else:
+        enc_privkey = _try_load_key(enc_key_path.read_bytes())
+        if enc_privkey is None:
+            enc_key_status = "enc_key_corrupt"
+            print(f"[Login] Cannot load enc key for {email}. Attempting auto-recovery...")
+            enc_privkey = _auto_recover_enc()
+            if enc_privkey:
+                enc_key_status = "ok"
+        elif not _key_matches_cert(enc_privkey, enc_cert_pem):
+            print(f"[Login] Enc key mismatch vs KDS cert for {email}. Attempting auto-recovery...")
+            enc_key_status = "enc_key_mismatch"
+            recovered = _auto_recover_enc()
+            if recovered:
+                enc_privkey = recovered
+                enc_key_status = "ok"
+            else:
+                print(f"[Login] Warning: enc key mismatch persists for {email}.")
+
+    # Determine overall key_status for UI
+    if sign_key_status != "ok":
+        key_status = sign_key_status
+    elif enc_key_status != "ok":
+        key_status = enc_key_status
+    else:
+        key_status = "ok"
 
     return {
         "email": email,
         "role": as_resp.get("role") or _lookup_principal_role(email) or "user",
-        "privkey": privkey,
-        "cert_pem": cert_pem,
-        "tgt": as_resp["tgt"],
-        "k_c_tgs": as_resp["k_c_tgs"],
+        # Dual-key fields
+        "sign_privkey":   sign_privkey,
+        "enc_privkey":    enc_privkey,
+        "sign_cert_pem":  sign_cert_pem,
+        "enc_cert_pem":   enc_cert_pem,
+        # Backward-compat aliases (privkey = signing key for sender auth)
+        "privkey":   sign_privkey,
+        "cert_pem":  sign_cert_pem,
+        # Kerberos
+        "tgt":      as_resp["tgt"],
+        "k_c_tgs":  as_resp["k_c_tgs"],
         "key_status": key_status,
     }
+
 
 
 def get_service_ticket(ctx: dict, id_v: str = MAIL_SRV_NAME) -> dict:
@@ -455,33 +627,50 @@ def send_secure_email(
     # 2. Get CRL
     crl_pem = kds_client.get_crl()  # may be None
 
-    # 3. Fetch and validate recipient certs
+    # 3. Fetch and validate recipient ENCRYPTION certs
     recipient_blobs = kds_client.bulk_get(recipient_emails)
     recipients = []
     for email in recipient_emails:
         if email not in recipient_blobs:
             raise RuntimeError(f"no cert for {email}")
-        cert_pem = recipient_blobs[email]
-        ok, msg = cert_validator.verify_chain(cert_pem, ca_cert_pem, crl_pem)
+        certs = recipient_blobs[email]
+        # Use encryption cert for CEK wrapping
+        enc_cert_pem = certs.get("enc")
+        # Validate chain against signing cert (or enc cert if sign unavailable)
+        chain_cert_pem = certs.get("sign") or enc_cert_pem
+        if not enc_cert_pem:
+            raise RuntimeError(f"no encryption cert for {email}")
+        ok, msg = cert_validator.verify_chain(chain_cert_pem, ca_cert_pem, crl_pem)
         if not ok:
             raise RuntimeError(f"cert {email} invalid: {msg}")
-        # Also check OCSP
-        cert_obj = x509.load_pem_x509_certificate(cert_pem)
+        # Also check OCSP using sign cert serial
+        cert_obj = x509.load_pem_x509_certificate(chain_cert_pem)
         ocsp = request("127.0.0.1", 9000, {
             "op": "ca.ocsp", "serial_hex": hex(cert_obj.serial_number),
         })
         if ocsp.get("status") != "good":
             raise RuntimeError(f"cert {email} OCSP={ocsp.get('status')}")
-        recipients.append((email, cert_pem))
+        recipients.append((email, enc_cert_pem))
 
     # 4. Build S/MIME envelope (sign then encrypt)
+    # Sign with sender's SIGNING key, encrypt CEK with recipient's ENC public key
+    sign_privkey = ctx.get("sign_privkey") or ctx.get("privkey")
+    sign_cert_pem = ctx.get("sign_cert_pem") or ctx.get("cert_pem", b"")
     body_bytes = body.encode("utf-8")
     envelope = smime_handler.build_envelope(
-        body_bytes, recipients, ctx["cert_pem"], ctx["privkey"]
+        body_bytes, recipients, sign_cert_pem, sign_privkey
     )
-    sender_copy_envelope = smime_handler.build_envelope(
-        body_bytes, [(ctx["email"], ctx["cert_pem"])], ctx["cert_pem"], ctx["privkey"]
-    )
+    # Sender copy: encrypt CEK with sender's OWN enc cert
+    try:
+        sender_enc_cert_pem = kds_client.get_enc_cert(ctx["email"]) or b""
+    except Exception:
+        sender_enc_cert_pem = b""
+    if sender_enc_cert_pem:
+        sender_copy_envelope = smime_handler.build_envelope(
+            body_bytes, [(ctx["email"], sender_enc_cert_pem)], sign_cert_pem, sign_privkey
+        )
+    else:
+        sender_copy_envelope = envelope  # fallback
 
     # 5. Get Service Ticket for mail
     st = get_service_ticket(ctx)
@@ -531,8 +720,10 @@ def _decode_pop3_message(ctx: dict, msg_id: int, full: dict, folder: str = "inbo
     }
 
     try:
+        # Use ENCRYPTION private key to decrypt the CEK
+        enc_privkey = ctx.get("enc_privkey") or ctx.get("privkey")
         opened = smime_handler.open_envelope(
-            full["envelope"], ctx["email"], ctx["privkey"]
+            full["envelope"], ctx["email"], enc_privkey
         )
         base.update({
             "body": opened["body"].decode("utf-8", errors="replace"),

@@ -119,6 +119,17 @@ python -m securemail.main_ca revoke 0x1234...
 python -m securemail.main_ca escrow bob@mail.local
 ```
 
+## Dual Key Pair Architecture (v2.1)
+
+SecureMail uses **two separate RSA-2048 keypairs per user** (RFC 5280, enterprise S/MIME):
+
+| | Signing Key | Encryption Key |
+|---|---|---|
+| **X.509 KeyUsage** | digitalSignature, nonRepudiation | keyEncipherment, dataEncipherment |
+| **Escrowed?** | NEVER (preserves non-repudiation) | YES via Shamir 2-of-3 |
+| **Auto-recoverable** | No | Yes — on next login |
+| **Local file** | .sign_key.pem, .sign_cert.pem | .enc_key.pem, .enc_cert.pem |
+
 ## Kiến trúc
 
 ```

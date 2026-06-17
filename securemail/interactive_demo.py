@@ -273,11 +273,13 @@ def interactive_bootstrap():
         (f"eve@{DOMAIN}", "eve-pw", "Eve", "user"),
         (f"admin@{DOMAIN}", "admin-pw", "Admin", "admin"),
     ]:
-        user_key = Path(f"data/users/{email.replace('@','_at_')}.key.pem")
-        if user_key.exists():
+        safe = email.replace('@', '_at_')
+        sign_key = Path(f"data/users/{safe}.sign_key.pem")
+        legacy_key = Path(f"data/users/{safe}.key.pem")
+        if sign_key.exists() or legacy_key.exists():
             info(email, f"SKIP (already registered)")
         else:
-            client_core.register(email, pw, display, role)
+            client_core.register(email, pw, display, role, force=True)
             info(email, f"Registered [OK] (role={role})")
     step_end()
 
@@ -377,9 +379,9 @@ def interactive_scenario_1():
     wait()
     ca_resp = request("127.0.0.1", 9000, {"op": "ca.root_cert"})
     ca_cert_pem = unb64(ca_resp["cert_pem_b64"])
-    bob_cert_pem = kds_client.get_cert(f"bob@{DOMAIN}")
-    assert bob_cert_pem, "Bob cert not found"
-    ci = cert_info_str(bob_cert_pem)
+    bob_enc_cert_pem = kds_client.get_enc_cert(f"bob@{DOMAIN}") or kds_client.get_cert(f"bob@{DOMAIN}")
+    assert bob_enc_cert_pem, "Bob encryption cert not found"
+    ci = cert_info_str(bob_enc_cert_pem)
     info("Bob's Subject", ci["subject"])
     info("Bob's Issuer", ci["issuer"])
     info("Bob's Serial", ci["serial"])
@@ -407,9 +409,11 @@ def interactive_scenario_1():
     )
     wait()
     body_bytes = body_text.encode("utf-8")
+    sign_privkey = alice.get("sign_privkey") or alice["privkey"]
+    sign_cert_pem = alice.get("sign_cert_pem") or alice["cert_pem"]
     envelope = smime_handler.build_envelope(
-        body_bytes, [(f"bob@{DOMAIN}", bob_cert_pem)],
-        alice["cert_pem"], alice["privkey"],
+        body_bytes, [(f"bob@{DOMAIN}", bob_enc_cert_pem)],
+        sign_cert_pem, sign_privkey,
     )
     env_parsed = json.loads(envelope.decode("utf-8"))
     info("Envelope version", env_parsed["version"])
@@ -870,7 +874,7 @@ def interactive_scenario_4():
     Path(f"data/users/alice_at_{DOMAIN}.key.pem").unlink(missing_ok=True)
     Path(f"data/users/alice_at_{DOMAIN}.cert.pem").unlink(missing_ok=True)
     Path(f"data/users/alice_at_{DOMAIN}.salt.bin").unlink(missing_ok=True)
-    client_core.register(f"alice@{DOMAIN}", "alice-pw", "Alice", "user")
+    client_core.register(f"alice@{DOMAIN}", "alice-pw", "Alice", "user", force=True)
     new_cert_pem = kds_client.get_cert(f"alice@{DOMAIN}")
     new_ci = cert_info_str(new_cert_pem)
     info("New serial", new_ci["serial"])
@@ -1110,7 +1114,11 @@ def interactive_scenario_7():
         '# Shares stored at: data/ca/escrow/bob_at_mail.local.share{1,2,3}.bin'
     )
     wait()
-    original_pem = Path(f"data/users/bob_at_{DOMAIN}.key.pem").read_bytes()
+    # Dual keypair: escrow holds enc_key (signing key is never escrowed)
+    enc_key_path = Path(f"data/users/bob_at_{DOMAIN}.enc_key.pem")
+    legacy_key_path = Path(f"data/users/bob_at_{DOMAIN}.key.pem")
+    original_pem = (enc_key_path if enc_key_path.exists() else legacy_key_path).read_bytes()
+    info("Escrowed key type", "ENCRYPTION key (signing key is never escrowed)")
     info("Original key size", f"{len(original_pem)} bytes")
     for i in range(1, 4):
         share_path = Path(f"data/ca/escrow/bob_at_{DOMAIN}.share{i}.bin")

@@ -73,8 +73,14 @@ def load_ca() -> tuple[rsa.RSAPrivateKey, x509.Certificate]:
     return priv, cert
 
 
-def sign_csr(csr_pem: bytes, email: str, days_valid: int = 365) -> bytes:
-    """Ký CSR, trả về cert PEM. Ghi DB."""
+def sign_csr(csr_pem: bytes, email: str, days_valid: int = 365,
+             key_usage: str = "sign") -> bytes:
+    """Ký CSR, trả về cert PEM. Ghi DB.
+
+    Args:
+        key_usage: 'sign' → cert for digitalSignature + nonRepudiation (signing key).
+                   'enc'  → cert for keyEncipherment + dataEncipherment (encryption key).
+    """
     csr = x509.load_pem_x509_csr(csr_pem)
     if not csr.is_signature_valid:
         raise ValueError("CSR signature invalid")
@@ -82,6 +88,22 @@ def sign_csr(csr_pem: bytes, email: str, days_valid: int = 365) -> bytes:
     ca_priv, ca_cert = load_ca()
     now = dt.datetime.now(dt.timezone.utc)
     serial = x509.random_serial_number()
+
+    # Build KeyUsage extension based on intended key role
+    if key_usage == "enc":
+        key_usage_ext = x509.KeyUsage(
+            digital_signature=False, content_commitment=False,
+            key_encipherment=True,  data_encipherment=True,
+            key_agreement=False,    key_cert_sign=False, crl_sign=False,
+            encipher_only=False,    decipher_only=False,
+        )
+    else:  # 'sign' (default)
+        key_usage_ext = x509.KeyUsage(
+            digital_signature=True, content_commitment=True,  # non-repudiation
+            key_encipherment=False, data_encipherment=False,
+            key_agreement=False,    key_cert_sign=False, crl_sign=False,
+            encipher_only=False,    decipher_only=False,
+        )
 
     cert = (
         x509.CertificateBuilder()
@@ -92,15 +114,7 @@ def sign_csr(csr_pem: bytes, email: str, days_valid: int = 365) -> bytes:
         .not_valid_before(now - dt.timedelta(minutes=5))
         .not_valid_after(now + dt.timedelta(days=days_valid))
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
-        .add_extension(
-            x509.KeyUsage(
-                digital_signature=True, content_commitment=True,
-                key_encipherment=True, data_encipherment=True,
-                key_agreement=False, key_cert_sign=False, crl_sign=False,
-                encipher_only=False, decipher_only=False,
-            ),
-            critical=True,
-        )
+        .add_extension(key_usage_ext, critical=True)
         .add_extension(
             x509.ExtendedKeyUsage([x509.ExtendedKeyUsageOID.EMAIL_PROTECTION]),
             critical=False,
@@ -140,8 +154,8 @@ def sign_csr(csr_pem: bytes, email: str, days_valid: int = 365) -> bytes:
          bytearray(cert_pem)),
     )
     conn.close()
-    _audit("SIGN_CSR", f"email={email} serial={hex(serial)}")
-    print(f"[CA] Signed cert for {email}, serial={hex(serial)}")
+    _audit("SIGN_CSR", f"email={email} serial={hex(serial)} key_usage={key_usage}")
+    print(f"[CA] Signed {key_usage} cert for {email}, serial={hex(serial)}")
     return cert_pem
 
 

@@ -27,7 +27,10 @@ def _handle(conn: socket.socket, addr):
         req = recv_json(conn)
         op = req.get("op")
         if op == "ca.sign_csr":
-            cert = ca_core.sign_csr(unb64(req["csr_pem_b64"]), req["email"])
+            cert = ca_core.sign_csr(
+                unb64(req["csr_pem_b64"]), req["email"],
+                key_usage=req.get("key_usage", "sign"),
+            )
             send_json(conn, {"ok": True, "cert_pem_b64": b64(cert)})
         elif op == "ca.revoke":
             ok = ca_core.revoke_cert(req["serial_hex"])

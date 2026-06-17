@@ -76,17 +76,23 @@ def _ensure_mailbox_folder():
             CONSTRAINT DF_mailbox_folder DEFAULT 'inbox'
     END
     """)
-    cursor.execute("""
-    IF NOT EXISTS (
-        SELECT 1 FROM sys.indexes
-        WHERE name = 'idx_mailbox_recipient_folder'
-          AND object_id = OBJECT_ID('mail.mailbox')
-    )
-    BEGIN
-        CREATE INDEX idx_mailbox_recipient_folder
-        ON mail.mailbox(recipient, folder, fetched)
-    END
-    """)
+    try:
+        cursor.execute("""
+        IF NOT EXISTS (
+            SELECT 1 FROM sys.indexes
+            WHERE name = 'idx_mailbox_recipient_folder'
+              AND object_id = OBJECT_ID('mail.mailbox')
+        )
+        BEGIN
+            CREATE INDEX idx_mailbox_recipient_folder
+            ON mail.mailbox(recipient, folder, fetched)
+        END
+        """)
+        conn.commit()
+    except pymssql.exceptions.OperationalError as e:
+        # Ignore if index was concurrently created by another service
+        if "already exists" not in str(e):
+            raise
     conn.close()
     _MAILBOX_FOLDER_READY = True
 

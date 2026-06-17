@@ -315,3 +315,38 @@ securemail/
 - [ ] Báo cáo trích dẫn chương giáo trình cho mỗi tính năng (xem §10)
 - [ ] Code có unit test cho `crypto/`, `ticket_service/`, `smime_handler.py`
 - [ ] README + hướng dẫn chạy 3 service (CA, KDS, Ticket) + Mail Server + Client
+
+
+---
+
+## CAP NHAT v2.1 -- DUAL KEY PAIR ARCHITECTURE
+
+Ke tu v2.1, moi user co HAI cap khoa RSA-2048 thay vi mot:
+
+| Muc dich | KeyUsage X.509 | Escrow? |
+|---|---|---|
+| Ky so (Signing) | digitalSignature, contentCommitment | KHONG bao gio |
+| Ma hoa (Encryption) | keyEncipherment, dataEncipherment | Co (Shamir 2-of-3) |
+
+### Cap nhat B1 -- Mo hinh khoa
+
+Moi user co 2 cert tren KDS (cert_type = sign hoac enc):
+- sign_cert: public key xac minh chu ky RSA-PSS
+- enc_cert: public key wrap CEK (RSA-OAEP)
+
+### Cap nhat M5 -- Digital Signature
+
+Nguoi gui ky bang sign_privkey (khong bao gio escrow -> non-repudiation).
+Nguoi nhan dung sign_cert de xac minh.
+
+### Cap nhat A9 -- Key Recovery
+
+Chi enc_key duoc escrow qua Shamir 2-of-3 trong SQL Server.
+sign_key khong duoc escrow -> non-repudiation dam bao.
+
+### S/MIME Envelope version 2
+
+Truong signer_sign_cert_b64 trong envelope la SIGNING cert cua nguoi gui (khong phai enc_cert).
+CEK duoc ma hoa bang enc_cert cua nguoi nhan.
+
+Chay test: python -m pytest securemail/tests/test_dual_keypair.py -v
