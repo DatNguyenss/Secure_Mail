@@ -268,13 +268,15 @@ BEGIN
         dmarc_action VARCHAR(20) NULL,
         spf_result VARCHAR(20) NULL,
         dkim_result VARCHAR(50) NULL,
+        folder NVARCHAR(20) NOT NULL CONSTRAINT DF_mail_mailbox_folder DEFAULT 'inbox',
         fetched BIT NOT NULL CONSTRAINT DF_mail_mailbox_fetched DEFAULT 0,
         CONSTRAINT CK_mail_mailbox_dmarc_action CHECK (dmarc_action IN ('accept', 'quarantine', 'reject', 'none')),
-        CONSTRAINT CK_mail_mailbox_spf_result CHECK (spf_result IN ('pass', 'fail', 'none'))
+        CONSTRAINT CK_mail_mailbox_spf_result CHECK (spf_result IN ('pass', 'fail', 'none')),
+        CONSTRAINT CK_mail_mailbox_folder CHECK (folder IN ('inbox', 'sent'))
     );
     
-    -- Composite index to speed up POP3 fetches for specific recipient
-    CREATE INDEX idx_mail_mailbox_recipient ON mail.mailbox(recipient, fetched);
+    -- Composite index to speed up POP3 Inbox/Sent fetches for a recipient.
+    CREATE INDEX idx_mailbox_recipient_folder ON mail.mailbox(recipient, folder, fetched);
 END
 GO
 
